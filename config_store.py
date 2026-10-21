@@ -4,6 +4,7 @@
 """
 import json
 import os
+import sys
 
 DEFAULT_PROFILES = [
     {
@@ -20,7 +21,12 @@ DEFAULT_PROFILES = [
 
 class ProfileStore:
     def __init__(self, filename="ip_profiles.json"):
-        base = os.path.dirname(os.path.abspath(__file__))
+        # 打包后 __file__ 指向临时解压目录，必须用 exe 所在目录，
+        # 否则方案存不进去、每次启动都回到示例数据。
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        else:
+            base = os.path.dirname(os.path.abspath(__file__))
         self.path = os.path.join(base, filename)
 
     def load(self):
