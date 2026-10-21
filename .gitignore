@@ -2,17 +2,18 @@ __pycache__/
 *.py[cod]
 *.pyo
 
-# PyInstaller 构建产物
+# PyInstaller 构建中间产物
 build/
-dist/
 *.spec
 
-# 本地方案配置，含真实内网 IP，不入库
+# 本地运行产生的文件（含真实内网 IP / 桌面位置，不入库）
 ip_profiles.json
-
-# 贴纸界面的窗口位置 / 透明度偏好
 sticker_config.json
+sticker.pid
 
 .DS_Store
 Thumbs.db
-#### exe build outputs
+
+# 注意：dist/ 不整体忽略 —— exe 和安装包需要入库供下载。
+# 提交时用：git add -f dist/IPSwitcher.exe dist/IPQuickSwitcher-Setup.exe
+# 别把 dist/ 下的 *.pid、*.json 一起带进去。

@@ -1,98 +1,89 @@
 # -*- coding: utf-8 -*-
 """
-IP 切换器 - 桌面贴纸（桌面小组件）
+IP 切换器 - 桌面贴纸（前端显示）
 
-无边框、可拖动、半透明，显示当前网卡 IP 并支持一键切换方案。
-右键打开菜单：方案列表 / DHCP / 显示模式 / 透明度 / 退出。
+职责收窄：**只负责显示**
+    - 列出所有方案，当前选中的方案名前带一个小绿点
+    - 点击某个方案即切换到该方案
+    - 可以拖动位置、拖右下角改变大小
+    - 「固定」模式（由主界面控制）下，拖动和缩放都锁死，只剩点击切换
 
-显示模式有三种：
-    desktop  嵌入桌面层（默认）—— 随桌面显示，不干扰其他窗口
-    top      悬浮置顶        —— 永远盖在其他窗口之上
-    normal   普通窗口        —— 会被正常遮挡
+所有设置（显示模式 / 透明度 / 大小 / 固定 / 位置）都由主界面写入
+sticker_config.json，贴纸只读+ 监听该文件变化，不会自己改配置。
 """
 import json
 import os
 import sys
 import tkinter as tk
-from tkinter import ttk, messagebox
 
-from net_tools import (
-    list_interfaces,
-    get_status,
-    apply_profile,
-    set_dhcp,
-    is_admin,
-    run_as_admin,
-)
+from net_tools import list_interfaces, apply_profile, set_dhcp, get_status, is_admin
 from config_store import ProfileStore
-from tray import TrayIcon, ensure_autostart, is_autostart_enabled, toggle_autostart
 from win_desktop import attach as desktop_attach
 from win_desktop import detach as desktop_detach
 from win_desktop import is_supported as desktop_supported
-
-APP_TITLE = "IP 贴纸"
-
-MODES = {
-    "desktop": "嵌入桌面层",
-    "top": "悬浮置顶",
-    "normal": "普通窗口",
-}
-
-BG = "#1e1e1e"
-BG_HEADER = "#2d2d2d"
-FG = "#d4d4d4"
-FG_DIM = "#808080"
-ACCENT = "#007acc"
-OK = "#4ec9b0"
-WARN = "#dcdcaa"
+from tray import TrayIcon
 
 SETTINGS_FILE = "sticker_config.json"
 
+BG = "#1e1f22"
+BG_ITEM = "#1e1f22"
+BG_ITEM_HOVER = "#2a2b2e"
+FG = "#e8e8e8"
+FG_DIM = "#9a9a9a"
+GREEN = "#4caf50"
+GREEN_DIM = "#2e6b33"
+
+
+def _app_dir():
+    """配置和方案都放 exe 同级（打包后也一样），源码运行时是脚本目录。"""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
 
 class Settings:
-    """贴纸自身的偏好：位置、透明度、显示模式等。"""
+    """只读贴纸设置 + 监听主界面的改动。"""
 
     DEFAULTS = {
+        "enabled": True,
         "x": None,
         "y": None,
+        "w": 220,
+        "h": None,          # None = 按方案数自适应
         "alpha": 0.92,
-        # 桌面层模式依赖 Explorer，部分机器资源管理器未就绪时贴纸会不可见；
-        # 默认改为悬浮置顶，保证一启动就能看见，用户可右键改回桌面层。
-        "mode": "top",
-        "auto_refresh": True,
-        "refresh_ms": 5000,
+        "mode": "top",      # desktop / top / normal
+        "fixed": False,     # 固定后不能拖动/缩放
     }
 
     def __init__(self, path=None):
-        # 打包后 __file__ 指向临时解压目录，配置必须在 exe 旁边才留得住
-        if path:
-            self.path = path
-        elif getattr(sys, "frozen", False):
-            self.path = os.path.join(os.path.dirname(sys.executable), SETTINGS_FILE)
-        else:
-            self.path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
+        self.path = path or os.path.join(_app_dir(), SETTINGS_FILE)
         self.data = dict(self.DEFAULTS)
-        stored = None
-        if os.path.exists(self.path):
-            try:
+        self._mtime = 0.0
+        self.load()
+
+    def load(self):
+        try:
+            if os.path.exists(self.path):
+                self._mtime = os.path.getmtime(self.path)
                 with open(self.path, "r", encoding="utf-8") as f:
                     stored = json.load(f)
-            except Exception:
-                stored = None
-        if isinstance(stored, dict):
-            self.data.update(stored)
-            # 旧版配置只有 always_on_top 布尔值，迁移到新的三档模式。
-            # 注意判断依据是「旧配置里有没有 always_on_top」，不能看 mode 是否存在——
-            # 因为 DEFAULTS 里已经带了 mode，那样判断永远不成立。
-            if "mode" not in stored and "always_on_top" in stored:
-                self.data["mode"] = "top" if stored["always_on_top"] else "desktop"
-
-    def save(self):
-        try:
-            with open(self.path, "w", encoding="utf-8") as f:
-                json.dump(self.data, f, ensure_ascii=False, indent=2)
+                if isinstance(stored, dict):
+                    self.data.update(stored)
         except Exception:
             pass
+        return self.data
+
+    def reload_if_changed(self):
+        """主界面改过配置就重载。返回是否变了。"""
+        try:
+            m = os.path.getmtime(self.path)
+        except OSError:
+            return False
+        if m != self._mtime:
+            self._mtime = m
+            self.load()
+            return True
+        return False
 
 
 class Sticker(tk.Tk):
@@ -102,53 +93,63 @@ class Sticker(tk.Tk):
         self.store = ProfileStore()
         self.interfaces = []
         self.current_iface = ""
-        self._drag = {"x": 0, "y": 0}
+        self.active_index = -1          # 当前生效的方案下标
+        self._drag = None
+        self._resize = None
         self._attached = False
+        self._items = []                # 每个方案的行 frame
+        self._last_signature = None
 
-        self._build_ui()
-        self._apply_window_attrs()
-        self._apply_mode()
-
-        # 托盘图标：贴纸关掉后还能从托盘唤回；并写入开机自启
-        self.tray = TrayIcon(self, tip="IP 快速切换器 - 贴纸")
-        ensure_autostart()
-        self._load_position()
-        self.refresh_interfaces()
-        self.schedule_refresh()
-
-    # ---------------- 窗口属性 ----------------
-    def _apply_window_attrs(self):
-        # 无边框：贴纸的关键，去掉标题栏和窗口边框
         self.overrideredirect(True)
-        try:
-            self.attributes("-alpha", self.settings.data["alpha"])
-        except Exception:
-            pass
-        try:
-            self.attributes("-topmost", self.settings.data["mode"] == "top")
-        except Exception:
-            pass
-        # Windows 专用：不在任务栏显示
+        self.configure(bg=BG)
         try:
             self.attributes("-toolwindow", True)
         except Exception:
             pass
-        self.configure(bg=BG)
-        self.resizable(False, False)
 
-    def _hwnd(self):
-        """取窗口句柄；非 Windows 返回 0。"""
-        if not desktop_supported():
-            return 0
+        self._apply_alpha()
+        self._apply_mode()
+        self._load_geometry()
+
+        self._build_ui()
+        self.refresh()
+        self._register_pid()
+
+        # 松手时保存几何；固定模式下会被忽略
+        self.bind("<ButtonRelease-1>", lambda e: self._save_geometry())
+
+        self.tray = TrayIcon(self, tip="IP 快速切换器 - 贴纸")
+        self.protocol("WM_DELETE_WINDOW", self._hide)
+
+        self._tick()
+
+    def _register_pid(self):
+        """把自己 PID 登记到文件，主界面靠它判断贴纸是否在运行。"""
         try:
-            self.update_idletasks()
-            return int(self.frame(), 16)
+            path = os.path.join(_app_dir(), "sticker.pid")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(str(os.getpid()))
         except Exception:
-            return 0
+            pass
+
+    def _unregister_pid(self):
+        try:
+            path = os.path.join(_app_dir(), "sticker.pid")
+            with open(path, "r", encoding="utf-8") as f:
+                if (f.read() or "").strip() == str(os.getpid()):
+                    os.remove(path)
+        except Exception:
+            pass
+
+    # ---------------- 窗口行为 ----------------
+    def _apply_alpha(self):
+        try:
+            self.attributes("-alpha", float(self.settings.data.get("alpha", 0.92)))
+        except Exception:
+            pass
 
     def _apply_mode(self):
-        """按当前模式落到对应的窗口层级。"""
-        mode = self.settings.data.get("mode", "desktop")
+        mode = self.settings.data.get("mode", "top")
         try:
             self.attributes("-topmost", mode == "top")
         except Exception:
@@ -158,319 +159,276 @@ class Sticker(tk.Tk):
                 desktop_detach(self._hwnd())
                 self._attached = False
             return
-        # 桌面模式下不能有 -topmost，二者互斥
         if not self._attached:
             self._attached = desktop_attach(self._hwnd())
 
-    def _load_position(self):
-        # 先给个默认几何，再按上次记忆的位置摆放
-        self.update_idletasks()
-        w, h = 240, 132
-        x = self.settings.data.get("x")
-        y = self.settings.data.get("y")
-        if x is None or y is None:
-            x = self.winfo_screenwidth() - w - 20
-            y = self.winfo_screenheight() - h - 60
-        # 位置越界（比如换了显示器）就拉回屏幕内
-        x = max(0, min(int(x), self.winfo_screenwidth() - 40))
-        y = max(0, min(int(y), self.winfo_screenheight() - 40))
-        self.geometry(f"{w}x{h}+{x}+{y}")
-
-    # ---------------- UI ----------------
-    def _build_ui(self):
-        header = tk.Frame(self, bg=BG_HEADER, height=26)
-        header.pack(fill=tk.X)
-        header.pack_propagate(False)
-
-        self.dot = tk.Label(header, text="●", bg=BG_HEADER, fg=OK, font=("Segoe UI", 9))
-        self.dot.pack(side=tk.LEFT, padx=(8, 4))
-        # 按需求：不要标题文字，只留状态点，靠 ≡ 菜单操作
-        self._drag_bind(header)
-
-        btn_close = tk.Label(header, text="×", bg=BG_HEADER, fg=FG_DIM,
-                             font=("Segoe UI", 12), cursor="hand2")
-        btn_close.pack(side=tk.RIGHT, padx=(0, 8))
-        btn_close.bind("<Button-1>", lambda e: self.on_close())
-        btn_close.bind("<Enter>", lambda e: btn_close.config(fg="#f48771"))
-        btn_close.bind("<Leave>", lambda e: btn_close.config(fg=FG_DIM))
-
-        btn_menu = tk.Label(header, text="≡", bg=BG_HEADER, fg=FG_DIM,
-                            font=("Segoe UI", 13), cursor="hand2")
-        btn_menu.pack(side=tk.RIGHT, padx=6)
-        btn_menu.bind("<Button-1>", lambda e: self.show_menu(e))
-        btn_menu.bind("<Enter>", lambda e: btn_menu.config(fg=FG))
-        btn_menu.bind("<Leave>", lambda e: btn_menu.config(fg=FG_DIM))
-
-        body = tk.Frame(self, bg=BG)
-        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 0))
-
-        self.lbl_iface = tk.Label(body, text="—", bg=BG, fg=FG_DIM, anchor=tk.W,
-                                  font=("Microsoft YaHei UI", 8))
-        self.lbl_iface.pack(fill=tk.X)
-
-        self.lbl_ip = tk.Label(body, text="读取中…", bg=BG, fg=FG, anchor=tk.W,
-                               font=("Consolas", 15, "bold"))
-        self.lbl_ip.pack(fill=tk.X)
-
-        self.lbl_gw = tk.Label(body, text="", bg=BG, fg=FG_DIM, anchor=tk.W,
-                               font=("Microsoft YaHei UI", 8))
-        self.lbl_gw.pack(fill=tk.X)
-
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill=tk.X, padx=8, pady=6)
-        for text, cmd in (("方案", lambda: self.show_menu()),
-                          ("DHCP", self.apply_dhcp),
-                          ("刷新", self.refresh_status)):
-            b = tk.Label(bar, text=text, bg="#333333", fg=FG, padx=10, pady=2,
-                         font=("Microsoft YaHei UI", 8), cursor="hand2")
-            b.pack(side=tk.LEFT, padx=(0, 5))
-            b.bind("<Button-1>", lambda e, c=cmd: c())
-            b.bind("<Enter>", lambda e, b=b: b.config(bg=ACCENT))
-            b.bind("<Leave>", lambda e, b=b: b.config(bg="#333333"))
-
-        # 让正文也能拖动，但按钮不参与
-        for wgt in (body, self.lbl_iface, self.lbl_ip, self.lbl_gw, bar):
-            self._drag_bind(wgt)
-        # 任意位置右键都出菜单
-        for cls in (self, header, body):
-            cls.bind("<Button-3>", lambda e: self.show_menu(e))
-        self.bind("<Escape>", lambda e: self.on_close())
-
-    def _drag_bind(self, widget):
-        widget.bind("<ButtonPress-1>", self._drag_start)
-        widget.bind("<B1-Motion>", self._drag_move)
-
-    def _drag_start(self, event):
-        self._drag["x"] = event.x_root - self.winfo_x()
-        self._drag["y"] = event.y_root - self.winfo_y()
-
-    def _drag_move(self, event):
-        self.geometry(f"+{event.x_root - self._drag['x']}+{event.y_root - self._drag['y']}")
-
-    # ---------------- 右键菜单 ----------------
-    def show_menu(self, event=None):
-        menu = tk.Menu(self, tearoff=0, bg="#252526", fg=FG,
-                       activebackground=ACCENT, activeforeground="#ffffff",
-                       borderwidth=0, relief="flat")
-
-        menu.add_command(label=f"网卡：{self._iface_name()}", state="disabled")
-        menu.add_separator()
-
-        menu.add_command(label="刷新", command=self.refresh_status)
-        menu.add_separator()
-
-        profiles = self.store.load()
-        if profiles:
-            for i, p in enumerate(profiles):
-                menu.add_command(label=f"  切换到 {p.get('name')}",
-                                 command=lambda pf=p: self.apply_profile(pf))
-        else:
-            menu.add_command(label="（暂无方案，请用完整版添加）", state="disabled")
-        menu.add_command(label="切换到 DHCP", command=self.apply_dhcp)
-        menu.add_separator()
-
-        ar_var = tk.BooleanVar(value=self.settings.data["auto_refresh"])
-        mode_var = tk.StringVar(value=self.settings.data.get("mode", "desktop"))
-
-        sub_opacity = tk.Menu(menu, tearoff=0, bg="#252526", fg=FG,
-                              activebackground=ACCENT, activeforeground="#ffffff")
-        for value in (0.5, 0.7, 0.85, 0.92, 1.0):
-            sub_opacity.add_command(label=f"{int(value * 100)}%",
-                                    command=lambda v=value: self.set_opacity(v))
-
-        # 显示模式三选一；桌面嵌入在不支持的系统（非 Windows）上禁用
-        sub_mode = tk.Menu(menu, tearoff=0, bg="#252526", fg=FG,
-                           activebackground=ACCENT, activeforeground="#ffffff")
-        for key, label in MODES.items():
-            state = "normal" if (key != "desktop" or desktop_supported()) else "disabled"
-            if key == "desktop":
-                label = f"{label}（推荐）"
-            sub_mode.add_radiobutton(label=label, variable=mode_var, value=key,
-                                     command=lambda k=key: self.set_mode(k),
-                                     state=state)
-        if self.settings.data.get("mode") == "desktop" and not self._attached:
-            sub_mode.add_separator()
-            sub_mode.add_command(label="重新贴回桌面", command=self.reattach_desktop)
-
-        menu.add_cascade(label="显示模式", menu=sub_mode)
-        menu.add_checkbutton(label="自动刷新", variable=ar_var,
-                             command=lambda: self.toggle_auto_refresh())
-        menu.add_cascade(label="透明度", menu=sub_opacity)
-        menu.add_separator()
-
-        if not is_admin():
-            menu.add_command(label="以管理员重启", command=self.relaunch_admin)
-        menu.add_command(label="管理方案…", command=self.open_manager)
-        menu.add_separator()
-
-        # 开机自启开关（★ 表示当前已开启）
-        _on = is_autostart_enabled()
-        menu.add_checkbutton(
-            label="开机自动运行",
-            command=self.toggle_autostart_entry,
-        )
-        menu.add_separator()
-        menu.add_command(label="退出", command=self.quit_app)
-
-        if event:
-            menu.tk_popup(event.x_root, event.y_root)
-        else:
-            menu.tk_popup(self.winfo_rootx() + 10, self.winfo_rooty() + 30)
-
-    # ---------------- 数据 ----------------
-    def refresh_interfaces(self):
+    def _hwnd(self):
+        if not desktop_supported():
+            return 0
         try:
-            self.interfaces = list_interfaces()
+            self.update_idletasks()
+            return int(self.frame(), 16)
         except Exception:
-            self.interfaces = []
-        self.current_iface = self.interfaces[0]["name"] if self.interfaces else ""
-        self.refresh_status()
+            return 0
 
-    def _iface_name(self):
-        return self.current_iface or "（无网卡）"
+    def _locked(self):
+        """固定模式下不能拖动/缩放。"""
+        return bool(self.settings.data.get("fixed"))
 
-    def refresh_status(self):
-        if not self.current_iface:
-            self.lbl_ip.config(text="无网卡", fg=WARN)
-            self.dot.config(fg=WARN)
-            return
+    def _load_geometry(self):
+        self.update_idletasks()
+        d = self.settings.data
+        w = int(d.get("w") or 220)
+        h = d.get("h")
+        h = int(h) if h else self._estimate_height()
+        x, y = d.get("x"), d.get("y")
+        if x is None or y is None:
+            x = self.winfo_screenwidth() - w - 24
+            y = self.winfo_screenheight() - h - 80
+        x = max(0, min(int(x), self.winfo_screenwidth() - 60))
+        y = max(0, min(int(y), self.winfo_screenheight() - 60))
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.resizable(True, True)
+
+    def _estimate_height(self):
         try:
-            st = get_status(self.current_iface)
-        except Exception as e:
-            self.lbl_ip.config(text="读取失败", fg=WARN)
-            self.dot.config(fg=WARN)
-            self.lbl_gw.config(text=str(e)[:40])
+            n = max(1, len(self.store.load()))
+        except Exception:
+            n = 1
+        return 46 + n * 34 + 10   # 上下留白 + 每行高度
+
+    # ---------------- 界面 ----------------
+    def _build_ui(self):
+        self.list_frame = tk.Frame(self, bg=BG)
+        self.list_frame.pack(fill=tk.BOTH, expand=True)
+
+        # 拖动区域：整个空白处都能拖
+        self.list_frame.bind("<ButtonPress-1>", self._on_drag_start)
+        self.list_frame.bind("<B1-Motion>", self._on_drag_move)
+
+        # 右下角缩放把手
+        # Windows 的 X11 光标名（nwse/size_ne）在 tk 里不被识别，统一用默认光标
+        self.grip = tk.Label(self, text="◢", bg=BG, fg=FG_DIM)
+        self.grip.place(relx=1.0, rely=1.0, x=-14, y=-2, anchor=tk.SE)
+        self.grip.bind("<ButtonPress-1>", self._on_resize_start)
+        self.grip.bind("<B1-Motion>", self._on_resize_move)
+        self.grip.bind("<ButtonRelease-1>", self._on_resize_end)
+
+        self._rebuild_items([])
+
+    def _rebuild_items(self, profiles):
+        """按方案列表重建行；绿点标在当前选中项。"""
+        for w in self._items:
+            w.destroy()
+        self._items = []
+
+        if not profiles:
+            tk.Label(
+                self.list_frame, text="暂无方案\n去主界面添加", bg=BG, fg=FG_DIM,
+                font=("Microsoft YaHei UI", 9), justify=tk.CENTER,
+            ).pack(expand=True, pady=18)
             return
 
-        ips = st["ips"]
-        if ips:
-            self.lbl_ip.config(text=ips[0], fg=FG)
-            extra = f" +{len(ips) - 1}" if len(ips) > 1 else ""
-            self.dot.config(fg=OK)
-        else:
-            self.lbl_ip.config(text="未分配", fg=WARN)
-            extra = ""
-            self.dot.config(fg=WARN)
+        for idx, p in enumerate(profiles):
+            name = p.get("name") or "未命名"
+            ip = p.get("ip") or "DHCP"
+            row = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
+            row.pack(fill=tk.X, padx=2, pady=1)
 
-        gw = st["gateways"][0] if st["gateways"] else "—"
-        mode = "DHCP" if st["dhcp"] else "静态"
-        self.lbl_iface.config(text=f"{st['interface']}  ·  {mode}{extra}")
-        self.lbl_gw.config(text=f"网关 {gw}")
+            dot = tk.Label(row, text="●", bg=BG, fg=GREEN, font=("Segoe UI", 8))
+            dot.pack(side=tk.LEFT, padx=(10, 0))
 
-    def schedule_refresh(self):
-        if self.settings.data["auto_refresh"]:
-            self.refresh_status()
-            # Explorer 重启会让桌面附着失效，趁着刷新周期补回来
-            if self.settings.data.get("mode") == "desktop" and not self._attached:
-                self._attached = desktop_attach(self._hwnd())
-        self.after(self.settings.data["refresh_ms"], self.schedule_refresh)
+            text_col = tk.Frame(row, bg=BG)
+            text_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(7, 0))
 
-    # ---------------- 操作 ----------------
-    def apply_profile(self, profile):
-        name = profile.get("name")
-        if not messagebox.askyesno("确认", f"切换到方案「{name}」？", parent=self):
-            return
+            tk.Label(
+                text_col, text=name, bg=BG, fg=FG, anchor=tk.W,
+                font=("Microsoft YaHei UI", 9, "bold"),
+            ).pack(fill=tk.X)
+            tk.Label(
+                text_col, text=ip, bg=BG, fg=FG_DIM, anchor=tk.W,
+                font=("Consolas", 8),
+            ).pack(fill=tk.X)
+
+            row.bind("<Button-1>", lambda e, i=idx: self.apply_index(i))
+            row.bind("<Enter>", lambda e, r=row: self._hover(r, True))
+            row.bind("<Leave>", lambda e, r=row: self._hover(r, False))
+            for child in (dot, text_col):
+                child.bind("<Button-1>", lambda e, i=idx: self.apply_index(i))
+
+            self._items.append((row, dot))
+
+    def _hover(self, row, on):
         try:
-            apply_profile(self._iface_name(), profile)
-        except Exception as e:
-            messagebox.showerror("失败", str(e), parent=self)
-            return
-        self.refresh_status()
-
-    def apply_dhcp(self):
-        if not messagebox.askyesno("确认", "切换到自动获取 (DHCP)？", parent=self):
-            return
-        try:
-            set_dhcp(self._iface_name())
-        except Exception as e:
-            messagebox.showerror("失败", str(e), parent=self)
-            return
-        self.refresh_status()
-
-    def set_opacity(self, value):
-        self.settings.data["alpha"] = value
-        try:
-            self.attributes("-alpha", value)
+            row.configure(bg=BG_ITEM_HOVER if on else BG)
         except Exception:
             pass
-        self.settings.save()
 
-    def set_mode(self, mode):
-        if mode not in MODES:
-            return
-        self.settings.data["mode"] = mode
-        self.settings.save()
-        self._apply_mode()
-        # 解除附着后可能缩到后面，重新提一下
-        if mode != "desktop":
+    def _mark_active(self):
+        """给当前选中的方案点上绿点。"""
+        for i, (_, dot) in enumerate(self._items):
             try:
-                self.lift()
+                dot.configure(fg=GREEN if i == self.active_index else BG)
             except Exception:
                 pass
 
-    def reattach_desktop(self):
-        """Explorer 重启后附着会失效，用它重新贴回去。"""
-        self._attached = desktop_attach(self._hwnd())
-        if not self._attached:
-            messagebox.showwarning("贴回桌面失败",
-                                   "没有找到桌面窗口。请确认 Windows 资源管理器正在运行。",
-                                   parent=self)
-
-    def toggle_auto_refresh(self):
-        self.settings.data["auto_refresh"] = not self.settings.data["auto_refresh"]
-        self.settings.save()
-
-    def relaunch_admin(self):
-        if run_as_admin():
-            self.on_close()
-        else:
-            messagebox.showerror("失败", "提权失败，请手动右键以管理员身份运行", parent=self)
-
-    def open_manager(self):
-        """打开完整版管理界面（开发态跑 app.py，打包态提示用另一个 exe）。"""
-        import subprocess
-        import sys
-        if getattr(sys, "frozen", False):
-            messagebox.showinfo("管理方案", "请运行同目录下的 IPSwitcher.exe 管理方案", parent=self)
-            return
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
-        if os.path.exists(path):
-            subprocess.Popen([sys.executable, path])
-        else:
-            messagebox.showinfo("提示", "未找到 app.py", parent=self)
-
-    def on_close(self):
-        """点 × 收进托盘，托盘菜单里可真正退出。"""
-        self.settings.data["x"] = self.winfo_x()
-        self.settings.data["y"] = self.winfo_y()
-        self.settings.save()
-        self.withdraw()
-
-    def quit_app(self):
-        """托盘菜单「退出」：保存位置后彻底结束。"""
+    # ---------------- 刷新 ----------------
+    def _tick(self):
+        """定时检查：配置有没有被主界面改掉、方案有没有变。"""
+        if self.settings.reload_if_changed():
+            self._apply_alpha()
+            self._apply_mode()
+            self._load_geometry()
+        self.refresh()
         try:
-            self.settings.data["x"] = self.winfo_x()
-            self.settings.data["y"] = self.winfo_y()
-            self.settings.save()
+            self.after(1200, self._tick)
         except Exception:
             pass
+
+    def refresh(self):
+        try:
+            profiles = self.store.load()
+        except Exception:
+            profiles = []
+        sig = (len(profiles), self.settings.data.get("x"), self.settings.data.get("y"),
+               self.settings.data.get("w"), self.settings.data.get("h"))
+        if sig != self._last_signature:
+            self._last_signature = sig
+            self._rebuild_items(profiles)
+        self._detect_active(profiles)
+
+    def _detect_active(self, profiles):
+        """根据当前网卡实际 IP 判断哪个方案生效中。"""
+        if not self.current_iface:
+            ifaces = list_interfaces()
+            connected = [i for i in ifaces if i.get("state") == "connected"]
+            if not connected:
+                return
+            self.current_iface = connected[0]["name"]
+        try:
+            st = get_status(self.current_iface)
+        except Exception:
+            return
+        cur = (st.get("ips") or [""])[0]
+        idx = -1
+        for i, p in enumerate(profiles):
+            if p.get("ip") and p["ip"] == cur:
+                idx = i
+                break
+        if idx != self.active_index:
+            self.active_index = idx
+            self._mark_active()
+
+    # ---------------- 切换 ----------------
+    def apply_index(self, idx):
+        try:
+            profiles = self.store.load()
+        except Exception:
+            return
+        if idx < 0 or idx >= len(profiles):
+            return
+        p = profiles[idx]
+        if not self.current_iface:
+            ifaces = list_interfaces()
+            connected = [i for i in ifaces if i.get("state") == "connected"]
+            if connected:
+                self.current_iface = connected[0]["name"]
+        if not self.current_iface:
+            return
+
+        self.active_index = idx
+        self._mark_active()
+
+        if not is_admin():
+            self.tray.notify("需要管理员权限才能切换 IP\n请在主界面点「以管理员重启」")
+            return
+        try:
+            apply_profile(self.current_iface, p)
+            self.tray.notify(f"已切换到「{p.get('name')}」")
+        except Exception as e:
+            self.tray.notify(f"切换失败：{e}")
+
+    # ---------------- 拖动 / 缩放 ----------------
+    def _save_geometry(self):
+        """拖动/缩放后把位置大小写回配置（固定模式不写）。"""
+        if self._locked():
+            return
+        try:
+            d = dict(self.settings.data)
+            d["x"] = self.winfo_x()
+            d["y"] = self.winfo_y()
+            d["w"] = self.winfo_width()
+            d["h"] = self.winfo_height()
+            with open(self.settings.path, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=2)
+            self.settings._mtime = os.path.getmtime(self.settings.path)
+        except Exception:
+            pass
+
+    def _on_drag_start(self, e):
+        if self._locked():
+            return
+        self._drag = {"x": e.x_root - self.winfo_x(), "y": e.y_root - self.winfo_y()}
+
+    def _on_drag_move(self, e):
+        if self._locked() or not self._drag:
+            return
+        self.geometry(f"+{e.x_root - self._drag['x']}+{e.y_root - self._drag['y']}")
+        if self._attached:      # 桌面层模式下要重新附着，否则位置不跟
+            self.after_idle(lambda: self._reattach())
+
+    def _reattach(self):
+        if not self._attached:
+            return
+        try:
+            h = self._hwnd()
+            if h:
+                desktop_detach(h)
+                self._attached = desktop_attach(h)
+        except Exception:
+            pass
+
+    def _on_resize_start(self, e):
+        if self._locked():
+            return
+        self._resize = {
+            "x": e.x_root, "y": e.y_root,
+            "w": self.winfo_width(), "h": self.winfo_height(),
+        }
+
+    def _on_resize_move(self, e):
+        if self._locked() or not self._resize:
+            return
+        r = self._resize
+        w = max(150, r["w"] + (e.x_root - r["x"]))
+        h = max(90, r["h"] + (e.y_root - r["y"]))
+        self.geometry(f"{w}x{h}")
+        if self._attached:
+            self.after_idle(self._reattach)
+
+    def _on_resize_end(self, e):
+        self._resize = None
+        self._save_geometry()
+
+    # ---------------- 托盘 ----------------
+    def _hide(self):
+        self.withdraw()
+
+    def _show(self):
+        self.deiconify()
+        self.lift()
+
+    def quit_app(self):
+        self._unregister_pid()
         try:
             self.tray.stop()
         except Exception:
             pass
         self.destroy()
 
-    def toggle_autostart_entry(self):
-        """菜单里开关开机自启。"""
-        enabled = is_autostart_enabled()
-        if toggle_autostart(not enabled):
-            messagebox.showinfo(
-                "开机自启",
-                "已开启开机自动运行" if not enabled else "已关闭开机自动运行",
-                parent=self,
-            )
-        else:
-            messagebox.showerror("失败", "写入注册表失败，请检查权限", parent=self)
+    def on_close(self):
+        self._save_geometry()
+        self._hide()
 
 
 if __name__ == "__main__":

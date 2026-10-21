@@ -19,8 +19,8 @@ from tkinter import ttk, filedialog, messagebox
 
 APP_TITLE = "IP 快速切换器 · 安装"
 DEFAULT_DIR = os.path.join(os.environ.get("LOCALAPPDATA", os.path.expanduser("~")), "IPQuickSwitcher")
+# 单 exe：主界面和贴纸是同一个程序，贴纸用 --sticker 参数启动
 MAIN_EXE = "IPSwitcher.exe"
-STICKER_EXE = "IPSwitcherSticker.exe"
 
 BG = "#f5f6f8"
 ACCENT = "#2d6cdf"
@@ -73,14 +73,40 @@ def _run_hidden(cmd):
         subprocess.run(cmd, capture_output=True)
 
 
-def _create_shortcut(target, lnk_path):
-    """用 PowerShell 的 WScript.Shell 建快捷方式，比手写 .lnk 省事可靠。"""
+def _create_shortcut_args(target, lnk_path, args=""):
+    """带命令行参数的快捷方式（例如 --sticker 启动贴纸模式）。"""
     ps = (
         "$s = New-Object -ComObject WScript.Shell; "
         f"$l = $s.CreateShortcut('{lnk_path}'); "
-        f"$l.TargetPath = '{target}'; $l.Save()"
+        f"$l.TargetPath = '{target}'; $l.Arguments = '{args}'; $l.Save()"
     )
     _run_hidden(["powershell", "-NoProfile", "-Command", ps])
+
+
+def _create_shortcut(target, lnk_path):
+    """用 PowerShell 的 WScript.Shell 建快捷方式，比手写 .lnk 省事可靠。"""
+    _create_shortcut_args(target, lnk_path, "")
+
+
+def _set_autostart_args(entry_path, args=""):
+    try:
+        import winreg
+
+        value = f'"{entry_path}"' + (f" {args}" if args else "")
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as k:
+            winreg.SetValueEx(k, "IPSwitcher", 0, winreg.REG_SZ, value)
+        return True
+    except Exception:
+        return False
+
+
+def _set_autostart(entry_path):
+    return _set_autostart_args(entry_path, "")
 
 
 def _set_autostart(entry_path):
@@ -124,11 +150,11 @@ class Installer(tk.Tk):
                 font=("Microsoft YaHei UI", 10), anchor=tk.W,
                 wraplength=540, justify=tk.LEFT,
             ).pack(fill=tk.X, padx=22, pady=16)
-            for w in (self.install_btn,):
-                w.config(state=tk.DISABLED)
+            self.install_btn.config(state=tk.DISABLED)
             self.status.config(text="安装包不完整，请重新下载")
         except Exception:
             pass
+
     def _build(self):
         pad = {"padx": 22}
 
@@ -150,7 +176,7 @@ class Installer(tk.Tk):
 
         # 选项
         self.desktop_cb = tk.Checkbutton(
-            self, text="创建桌面快捷方式（主界面 + 贴纸）", variable=self.desktop_var,
+            self, text="创建桌面快捷方式（主界面 + 桌面贴纸）", variable=self.desktop_var,
             bg=BG, fg="#333", font=("Microsoft YaHei UI", 9), anchor=tk.W,
         )
         self.desktop_cb.pack(anchor=tk.W, pady=(14, 4), **pad)
@@ -164,12 +190,14 @@ class Installer(tk.Tk):
         # 组件说明
         comp = tk.Frame(self, bg="#ffffff", highlightbackground="#e0e0e0", highlightthickness=1)
         comp.pack(fill=tk.X, padx=22, pady=(14, 0))
-        tk.Label(comp, text="将安装以下两个程序：", bg="#ffffff", fg="#333",
+        tk.Label(comp, text="将安装：", bg="#ffffff", fg="#333",
                  font=("Microsoft YaHei UI", 9, "bold")).pack(anchor=tk.W, padx=12, pady=(10, 6))
-        tk.Label(comp, text="① IPSwitcher.exe          主界面：管理方案、切换 IP", bg="#ffffff", fg="#555",
+        tk.Label(comp, text="IPSwitcher.exe    同一个程序，两种界面：", bg="#ffffff", fg="#555",
                  font=("Microsoft YaHei UI", 9), anchor=tk.W).pack(fill=tk.X, padx=12)
-        tk.Label(comp, text="② IPSwitcherSticker.exe   桌面贴纸：实时显示当前 IP", bg="#ffffff", fg="#555",
-                 font=("Microsoft YaHei UI", 9), anchor=tk.W).pack(fill=tk.X, padx=12, pady=(2, 10))
+        tk.Label(comp, text="     · 直接双击 = 主界面（管理方案、预览贴纸、调整设置）",
+                 bg="#ffffff", fg="#777", font=("Microsoft YaHei UI", 9), anchor=tk.W).pack(fill=tk.X, padx=12)
+        tk.Label(comp, text="     · 带 --sticker 参数 = 桌面贴纸（只显示方案，点一下就切）",
+                 bg="#ffffff", fg="#777", font=("Microsoft YaHei UI", 9), anchor=tk.W).pack(fill=tk.X, padx=12, pady=(2, 10))
 
         # 安装后启动
         after = tk.Frame(self, bg=BG)
@@ -191,11 +219,10 @@ class Installer(tk.Tk):
 
     # ---------------- 逻辑 ----------------
     def _check_sources(self):
-        missing = [n for n in (MAIN_EXE, STICKER_EXE) if not _source_exe(n)]
-        if missing:
+        if not _source_exe(MAIN_EXE):
             self._fatal(
                 "安装包不完整，缺少以下文件：\n\n"
-                + "\n".join(missing)
+                + MAIN_EXE
                 + "\n\n请重新从 GitHub 下载完整的安装包。",
             )
 
@@ -210,17 +237,14 @@ class Installer(tk.Tk):
             messagebox.showwarning("提示", "请填写安装位置")
             return
 
-        # 已在运行的文件先提示关掉，否则复制会失败
-        running = [n for n in (MAIN_EXE, STICKER_EXE) if _running(n)]
-        if running:
+        # 已在运行就先提示关掉，否则复制会失败
+        if _running(MAIN_EXE):
             if not messagebox.askyesno(
                 "程序正在运行",
-                "检测到以下程序正在运行：\n\n" + "\n".join(running) +
-                "\n\n继续安装会尝试覆盖，可能失败。建议先关闭它们。\n\n继续吗？",
+                "检测到 IP 快速切换器正在运行。\n\n继续安装会尝试覆盖，可能失败。建议先关闭它。\n\n继续吗？",
             ):
                 return
-            for n in running:
-                subprocess.run(["taskkill", "/IM", n, "/F"], capture_output=True)
+            subprocess.run(["taskkill", "/IM", MAIN_EXE, "/F"], capture_output=True)
 
         try:
             os.makedirs(target, exist_ok=True)
@@ -228,31 +252,31 @@ class Installer(tk.Tk):
             messagebox.showerror("失败", f"无法创建目录：\n{e}")
             return
 
-        installed = []
-        for name in (MAIN_EXE, STICKER_EXE):
-            src = _source_exe(name)
-            dst = os.path.join(target, name)
-            try:
-                shutil.copy2(src, dst)
-                installed.append(name)
-            except Exception as e:
-                messagebox.showerror("失败", f"复制 {name} 失败：\n{e}")
-                return
+        main_path = os.path.join(target, MAIN_EXE)
+        src = _source_exe(MAIN_EXE)
+        try:
+            shutil.copy2(src, main_path)
+        except Exception as e:
+            messagebox.showerror("失败", f"复制 {MAIN_EXE} 失败：\n{e}")
+            return
 
         self.status.config(text="程序已安装，正在创建快捷方式…")
-        main_path = os.path.join(target, MAIN_EXE)
-        sticker_path = os.path.join(target, STICKER_EXE)
 
         if self.desktop_var.get():
             desktop = os.path.join(os.path.expanduser("~"), "Desktop")
             try:
                 _create_shortcut(main_path, os.path.join(desktop, "IP 快速切换器.lnk"))
-                _create_shortcut(sticker_path, os.path.join(desktop, "IP 贴纸.lnk"))
+                # 贴纸快捷方式带 --sticker 参数，同一个 exe 启动贴纸模式
+                _create_shortcut_args(
+                    main_path,
+                    os.path.join(desktop, "IP 贴纸.lnk"),
+                    args='--sticker',
+                )
             except Exception:
                 pass
 
         if self.autostart_var.get():
-            _set_autostart(sticker_path)  # 开机先看到贴纸，随时能看 IP
+            _set_autostart_args(main_path, "--sticker")   # 开机先看到贴纸
 
         # 已存在的自启项如果指向旧位置，纠正过来
         if not self.autostart_var.get():
@@ -277,7 +301,7 @@ class Installer(tk.Tk):
         if launch == "main":
             subprocess.Popen([main_path])
         elif launch == "sticker":
-            subprocess.Popen([sticker_path])
+            subprocess.Popen([main_path, "--sticker"])
 
         # 完成提示用非阻塞的 Label，不弹 messagebox：
         # 打包后的 onefile 在部分环境里弹框会直接崩，且会挡住界面

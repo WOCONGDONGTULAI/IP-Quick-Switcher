@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 IP 快速切换器 - Windows
-图形界面入口
+图形界面入口（同时也是打包入口：加 --sticker 参数启动桌面贴纸）
 """
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -21,6 +22,7 @@ from tray import (
     is_autostart_enabled,
     toggle_autostart,
 )
+from sticker_panel import StickerPanel, launch_sticker, kill_sticker
 
 APP_TITLE = "IP 快速切换器"
 
@@ -130,9 +132,13 @@ class App(tk.Tk):
 
         out = ttk.LabelFrame(right, text="输出")
         out.pack(fill=tk.BOTH, expand=True, pady=6)
-        self.log = tk.Text(out, height=12, wrap=tk.WORD)
+        self.log = tk.Text(out, height=7, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
         self.log.configure(state=tk.DISABLED)
+
+        # 桌面贴纸控制面板：所有贴纸设置都在这里调，贴纸本身只管显示
+        self.sticker_panel = StickerPanel(right, on_change=self._on_sticker_change)
+        self.sticker_panel.pack(fill=tk.BOTH, expand=False, pady=(6, 0))
 
         self.status_var = tk.StringVar(value="就绪")
         ttk.Label(self, textvariable=self.status_var, anchor=tk.W, relief=tk.SUNKEN).pack(fill=tk.X, side=tk.BOTTOM)
@@ -197,6 +203,16 @@ class App(tk.Tk):
         for p in self.profiles:
             tag = "静态" if p.get("mode", "static") == "static" else "DHCP"
             self.plist.insert(tk.END, f"[{tag}] {p.get('name')}")
+        self._sync_preview()
+
+    def _sync_preview(self):
+        """把当前方案列表同步给贴纸预览，让所见即所得。"""
+        panel = getattr(self, "sticker_panel", None)
+        if panel is not None:
+            panel.set_profiles(self.profiles)
+
+    def _on_sticker_change(self):
+        self.sticker_panel.refresh_status()
 
     def _refresh_quick_bar(self):
         """把每个方案做成顶部一枚按钮，双击/单击即切换。"""
@@ -372,4 +388,10 @@ class App(tk.Tk):
 
 
 if __name__ == "__main__":
-    App().mainloop()
+    # 同一个 exe 两种身份：默认主界面，--sticker 为桌面贴纸
+    if "--sticker" in sys.argv:
+        from sticker import Sticker
+
+        Sticker().mainloop()
+    else:
+        App().mainloop()
