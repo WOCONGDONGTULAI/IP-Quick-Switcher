@@ -11,6 +11,7 @@ IP 切换器 - 桌面贴纸（前端显示）
 所有设置（显示模式 / 透明度 / 大小 / 固定 / 位置）都由主界面写入
 sticker_config.json，贴纸只读+ 监听该文件变化，不会自己改配置。
 """
+import ctypes
 import json
 import os
 import sys
@@ -25,13 +26,97 @@ from tray import TrayIcon
 
 SETTINGS_FILE = "sticker_config.json"
 
-BG = "#1e1f22"
-BG_ITEM = "#1e1f22"
-BG_ITEM_HOVER = "#2a2b2e"
-FG = "#e8e8e8"
-FG_DIM = "#9a9a9a"
+# 磨砂玻璃深色主题（文字浅色，选中开关反色高亮）
+BG = "#232329"            # 磨砂底色基调（与 DWM 渐变一致）
+BG_ITEM = "#232329"
+BG_ITEM_HOVER = "#2e2e36"
+FG = "#f2f2f4"
+FG_DIM = "#a8a8b0"
 GREEN = "#4caf50"
-GREEN_DIM = "#2e6b33"
+TOGGLE_OFF_BG = "#3b3b44"   # 未选中开关：深色胶囊
+TOGGLE_OFF_KNOB = "#f2f2f4" # 未选中圆点：白色
+TOGGLE_ON_BG = "#f2f2f4"    # 选中开关：反色为浅色胶囊
+TOGGLE_ON_KNOB = "#232329"  # 选中圆点：深色
+
+
+def enable_acrylic(hwnd, alpha=0.80):
+    """Windows 10/11 磨砂玻璃（亚克力模糊）背景。
+
+    gradient 的 alpha 通道承担透明度 —— 窗口级 -alpha 会禁用模糊，不能用。
+    """
+    if not hwnd:
+        return False
+    try:
+        hwnd = int(hwnd)
+    except Exception:
+        return False
+
+    class ACCENT_POLICY(ctypes.Structure):
+        _fields_ = [
+            ("AccentState", ctypes.c_int),
+            ("AccentFlags", ctypes.c_int),
+            ("GradientColor", ctypes.c_uint),
+            ("AnimationId", ctypes.c_int),
+            ("BlurRegionId", ctypes.c_int),
+        ]
+
+    class WINCOMPATTRDATA(ctypes.Structure):
+        _fields_ = [
+            ("Attribute", ctypes.c_int),
+            ("Data", ctypes.c_void_p),
+            ("SizeOfData", ctypes.c_size_t),
+        ]
+
+    r, g, b = 0x23, 0x23, 0x29          # 与 BG 一致
+    a = max(0, min(255, int(alpha * 255)))
+    gradient = (a << 24) | (b << 16) | (g << 8) | r   # ABGR
+
+    accent = ACCENT_POLICY()
+    accent.AccentState = 4               # ACCENT_ENABLE_ACRYLICBLURBEHIND
+    accent.AccentFlags = 2
+    accent.GradientColor = gradient
+    data = WINCOMPATTRDATA()
+    data.Attribute = 19                  # WINDOWCOMPOSITIONATTRIB_ACCENT
+    data.Data = ctypes.cast(ctypes.byref(accent), ctypes.c_void_p)
+    data.SizeOfData = ctypes.sizeof(accent)
+    try:
+        return bool(ctypes.windll.user32.SetWindowCompositionAttribute(
+            hwnd, ctypes.byref(data)))
+    except Exception:
+        return False
+
+
+def disable_composition(hwnd):
+    hwnd = int(hwnd) if hwnd else 0
+    if not hwnd:
+        return False
+    class ACCENT_POLICY(ctypes.Structure):
+        _fields_ = [
+            ("AccentState", ctypes.c_int),
+            ("AccentFlags", ctypes.c_int),
+            ("GradientColor", ctypes.c_uint),
+            ("AnimationId", ctypes.c_int),
+            ("BlurRegionId", ctypes.c_int),
+        ]
+
+    class WINCOMPATTRDATA(ctypes.Structure):
+        _fields_ = [
+            ("Attribute", ctypes.c_int),
+            ("Data", ctypes.c_void_p),
+            ("SizeOfData", ctypes.c_size_t),
+        ]
+
+    accent = ACCENT_POLICY()
+    accent.AccentState = 0
+    data = WINCOMPATTRDATA()
+    data.Attribute = 19
+    data.Data = ctypes.cast(ctypes.byref(accent), ctypes.c_void_p)
+    data.SizeOfData = ctypes.sizeof(accent)
+    try:
+        return bool(ctypes.windll.user32.SetWindowCompositionAttribute(
+            hwnd, ctypes.byref(data)))
+    except Exception:
+        return False
 
 
 def _app_dir():
@@ -143,10 +228,9 @@ class Sticker(tk.Tk):
 
     # ---------------- 窗口行为 ----------------
     def _apply_alpha(self):
-        try:
-            self.attributes("-alpha", float(self.settings.data.get("alpha", 0.92)))
-        except Exception:
-            pass
+        """磨砂玻璃模式：不用窗口级 -alpha（会禁用模糊），透明度走 DWM 渐变通道。"""
+        self.after(200, lambda: enable_acrylic(
+            self._hwnd(), float(self.settings.data.get("alpha", 0.80))))
 
     def _apply_mode(self):
         mode = self.settings.data.get("mode", "top")
@@ -217,7 +301,12 @@ class Sticker(tk.Tk):
         self._rebuild_items([])
 
     def _rebuild_items(self, profiles):
-        """按方案列表重建行；绿点标在当前选中项。"""
+        """按方案列表重建行：左侧方案信息，右侧 iOS 风格开关。
+
+        开关方向与颜色即选中状态：
+            未选中 = 深色胶囊，白点在右（参考图样式）
+            选中   = 反色浅色胶囊，深点在左（与未选中方向、颜色均相反）
+        """
         for w in self._items:
             w.destroy()
         self._items = []
@@ -232,31 +321,47 @@ class Sticker(tk.Tk):
         for idx, p in enumerate(profiles):
             name = p.get("name") or "未命名"
             ip = p.get("ip") or "DHCP"
-            row = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
-            row.pack(fill=tk.X, padx=2, pady=1)
+            active = (idx == self.active_index)
 
-            dot = tk.Label(row, text="●", bg=BG, fg=GREEN, font=("Segoe UI", 8))
-            dot.pack(side=tk.LEFT, padx=(10, 0))
+            row = tk.Frame(self.list_frame, bg=BG, cursor="hand2")
+            row.pack(fill=tk.X, padx=6, pady=3)
 
             text_col = tk.Frame(row, bg=BG)
-            text_col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(7, 0))
-
+            text_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
             tk.Label(
-                text_col, text=name, bg=BG, fg=FG, anchor=tk.W,
-                font=("Microsoft YaHei UI", 9, "bold"),
+                text_col, text=name, bg=BG, fg=FG if active else FG_DIM,
+                anchor=tk.W, font=("Microsoft YaHei UI", 9, "bold"),
             ).pack(fill=tk.X)
             tk.Label(
-                text_col, text=ip, bg=BG, fg=FG_DIM, anchor=tk.W,
-                font=("Consolas", 8),
+                text_col, text=ip, bg=BG, fg=FG_DIM if active else "#707078",
+                anchor=tk.W, font=("Consolas", 8),
             ).pack(fill=tk.X)
 
-            row.bind("<Button-1>", lambda e, i=idx: self.apply_index(i))
-            row.bind("<Enter>", lambda e, r=row: self._hover(r, True))
-            row.bind("<Leave>", lambda e, r=row: self._hover(r, False))
-            for child in (dot, text_col):
+            toggle = tk.Canvas(
+                row, width=44, height=24, bg=BG, highlightthickness=0,
+            )
+            toggle.pack(side=tk.RIGHT, padx=(6, 2))
+            self._draw_toggle(toggle, active)
+
+            for w in (row, text_col, toggle):
+                w.bind("<Button-1>", lambda e, i=idx: self.apply_index(i))
+            for child in text_col.winfo_children():
                 child.bind("<Button-1>", lambda e, i=idx: self.apply_index(i))
 
-            self._items.append((row, dot))
+            self._items.append((row, toggle))
+
+    def _draw_toggle(self, cv, on):
+        """画胶囊开关。on=True 反色反向。"""
+        cap = TOGGLE_ON_BG if on else TOGGLE_OFF_BG
+        knob = TOGGLE_ON_KNOB if on else TOGGLE_OFF_KNOB
+        cv.delete("all")
+        # 胶囊 = 左半圆 + 矩形 + 右半圆
+        cv.create_oval(1, 1, 23, 23, fill=cap, outline=cap)
+        cv.create_rectangle(12, 1, 32, 23, fill=cap, outline=cap)
+        cv.create_oval(21, 1, 43, 23, fill=cap, outline=cap)
+        # 圆点：未选中在右（参考图），选中反到左
+        cx = 14 if on else 30
+        cv.create_oval(cx - 8, 4, cx + 8, 20, fill=knob, outline=knob)
 
     def _hover(self, row, on):
         try:
@@ -265,10 +370,10 @@ class Sticker(tk.Tk):
             pass
 
     def _mark_active(self):
-        """给当前选中的方案点上绿点。"""
-        for i, (_, dot) in enumerate(self._items):
+        """重画每行开关：选中项反色反向，其余保持参考图样式。"""
+        for i, (_, toggle) in enumerate(self._items):
             try:
-                dot.configure(fg=GREEN if i == self.active_index else BG)
+                self._draw_toggle(toggle, i == self.active_index)
             except Exception:
                 pass
 

@@ -200,19 +200,29 @@ class StickerPanel(ttk.LabelFrame):
         for i, p in enumerate(self._preview_profiles()):
             row = tk.Frame(inner, bg=faded)
             row.pack(fill=tk.X, padx=2, pady=1)
-            active = (i == self._preview_active)
-            tk.Label(row, text="●", bg=faded,
-                     fg=sticker_mod.GREEN if active else faded,
-                     font=("Segoe UI", max(6, int(8 * scale)))).pack(side=tk.LEFT,
-                                                                     padx=(8, 0))
+            active = (i == self._preview_active())
             col = tk.Frame(row, bg=faded)
             col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
             tk.Label(col, text=p.get("name", "未命名"), bg=faded,
                      fg=sticker_mod.FG if active else "#cfcfcf", anchor=tk.W,
                      font=("Microsoft YaHei UI", max(6, int(9 * scale)))).pack(fill=tk.X)
-            tk.Label(col, text=p.get("ip") or "DHCP", bg=faded,
-                     fg=sticker_mod.FG_DIM, anchor=tk.W,
-                     font=("Consolas", max(6, int(8 * scale)))).pack(fill=tk.X)
+
+            # 开关预览：与贴纸同款 —— 选中=浅色胶囊点在左，未选中=深色胶囊点在右
+            tw = max(28, int(44 * scale))
+            th = max(15, int(24 * scale))
+            knob_r = max(5, int(8 * scale))
+            cv = tk.Canvas(row, width=tw, height=th, bg=faded, highlightthickness=0)
+            cv.pack(side=tk.RIGHT, padx=(4, int(2 * scale)))
+            cap = sticker_mod.TOGGLE_ON_BG if active else sticker_mod.TOGGLE_OFF_BG
+            knob = sticker_mod.TOGGLE_ON_KNOB if active else sticker_mod.TOGGLE_OFF_KNOB
+            hw, hh = tw / 2, th / 2
+            r = hh - 1
+            cv.create_oval(1, 1, 1 + 2 * r, th - 1, fill=cap, outline=cap)
+            cv.create_rectangle(hw, 1, tw - hw, th - 1, fill=cap, outline=cap)
+            cv.create_oval(tw - 1 - 2 * r, 1, tw - 1, th - 1, fill=cap, outline=cap)
+            cx = hw if active else tw - hw
+            cv.create_oval(cx - knob_r, hh - knob_r, cx + knob_r, hh + knob_r,
+                           fill=knob, outline=knob)
 
         grip = tk.Label(inner, text="◢", bg=faded, fg=sticker_mod.FG_DIM,
                         font=("Segoe UI", max(6, int(8 * scale))))
