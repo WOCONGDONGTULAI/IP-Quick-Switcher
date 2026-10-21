@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller 构建产物
+build/
+dist/
+*.spec
+
+# 本地方案配置，含真实内网 IP，不入库
+ip_profiles.json
+
+.DS_Store
+Thumbs.db
