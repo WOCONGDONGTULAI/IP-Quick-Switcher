@@ -41,10 +41,25 @@ Windows 上一键切换网卡 IP 配置的小工具。两种前端：
 
 - 自动列出本机所有网卡（含中文名、英文名、带编号的如"以太网 2"）
 - 保存多套配置方案，名称自定义（如"办公室""实验室""家里"）
+- **顶部快捷切换栏**：每个方案一枚按钮，点一下就切过去，右侧一键切 DHCP
 - 一键应用静态 IP + 子网掩码 + 网关 + 首选/备用 DNS
 - 一键切回 DHCP 自动获取
 - 实时显示当前网卡配置与执行日志
+- **系统托盘图标**：双击托盘唤回窗口，右键菜单退出；点窗口 X 只是收进托盘
+- **开机自动运行**：首次运行自动写入注册表，界面顶部有「开机自启」勾选框随时开关
 - 配置保存在 `ip_profiles.json`，便携，可放 U 盘随身携带
+
+### 托盘与开机自启（`tray.py`）
+
+纯 `ctypes` 直接调 Win32 实现，**不依赖 pystray / Pillow** —— 单文件 exe 打包后照样能用。
+
+- 托盘图标：双击唤回主界面，右键弹出「显示主界面 / 退出」
+- 气泡提示：最小化到托盘时给一条提醒
+- 开机自启：写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `IPSwitcher` 项，
+  只影响当前用户，不需要管理员权限。贴纸右键菜单里也能直接开关
+
+> 注意：托盘消息用 `after` 定时非阻塞轮询处理（不用 `GetMessage` 死循环），
+> 否则主窗口会卡在启动阶段起不来。
 
 ## 使用方式
 
@@ -89,6 +104,33 @@ build.bat
 python -m pip install pyinstaller
 ```
 
+### 打包踩坑记录（血泪教训，2026-10-21）
+
+打包出来双击没反应、或者一闪就没，99% 是下面这几个原因：
+
+1. **打包用的 Python 必须带 tkinter**。
+   精简版 / embeddable 版 Python 没有 `_tkinter.pyd`，GUI 起来就崩。
+   验证：`python -c "import tkinter; print(tkinter.TkVersion)"`，报错就是不能用。
+   实在装不了带 tk 的官方版，可以用 [python-build-standalone](https://github.com/astral-sh/python-build-standalone/releases)
+   的 `install_only` 包 —— 标准布局、自带 tcl/tk，PyInstaller 收集得最干净。
+
+2. **别加 `--uac-admin`**。带了这参数每次启动都要过 UAC，非交互环境直接静默退出，
+   看起来就是「双击没反应」。真要提权在程序里用「以管理员重启」按钮即可。
+
+3. **conda 环境（micromamba/miniconda）打包会缺 DLL**。tcl/tk 和 libffi 都在 `Library\bin`，
+   PyInstaller 默认搜不到，报 `_tkinter` 或 `_ctypes` DLL load failed。
+   实在要用 conda 就得手动 `--add-binary` 把 `Library\bin\*.dll` 塞进去，很麻烦。
+
+4. 打包命令的推荐形态（配合第 1 条的 Python）：
+
+   ```
+   python -m PyInstaller --noconfirm --clean --onefile --noconsole ^
+       --name IPSwitcher --version-file version_info.txt app.py
+   ```
+
+5. **下载验证时先看文件大小**。raw 下载被截断会得到一个残缺 exe，症状和代码 bug 一模一样
+   （弹 Error 框），容易误判。10MB 的 exe 如果只剩 6MB，就是没下全。
+
 ## 底层命令
 
 工具实际执行的 netsh 命令（这也是最可靠的写法）：
@@ -131,9 +173,10 @@ netsh interface ipv4 set dnsservers name="以太网" dhcp
 
 | 文件 | 说明 |
 |---|---|
-| `sticker.py` | 桌面贴纸小面板（无边框） |
+| `sticker.py` | 桌面贴纸小面板（无边框、无标题文字） |
 | `win_desktop.py` | 桌面层嵌入（WorkerW 附着） |
-| `app.py` | 完整管理界面 |
+| `app.py` | 完整管理界面（含顶部方案快捷栏） |
+| `tray.py` | 托盘图标 + 开机自启（纯 ctypes Win32，零依赖） |
 | `net_tools.py` | netsh 命令封装、网卡解析、IP 校验 |
 | `config_store.py` | 方案读写（JSON 持久化） |
 | `test_offline.py` | 解析与校验单测（跨平台可跑） |
