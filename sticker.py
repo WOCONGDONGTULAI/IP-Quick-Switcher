@@ -1,0 +1,345 @@
+# -*- coding: utf-8 -*-
+"""
+IP 切换器 - 桌面贴纸（悬浮小组件）
+
+无边框、永远置顶、可拖动、半透明，显示当前网卡 IP 并支持一键切换方案。
+右键打开菜单：方案列表 / DHCP / 置顶 / 透明度 / 退出。
+"""
+import json
+import os
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+from net_tools import (
+    list_interfaces,
+    get_status,
+    apply_profile,
+    set_dhcp,
+    is_admin,
+    run_as_admin,
+)
+from config_store import ProfileStore
+
+APP_TITLE = "IP 贴纸"
+
+BG = "#1e1e1e"
+BG_HEADER = "#2d2d2d"
+FG = "#d4d4d4"
+FG_DIM = "#808080"
+ACCENT = "#007acc"
+OK = "#4ec9b0"
+WARN = "#dcdcaa"
+
+SETTINGS_FILE = "sticker_config.json"
+
+
+class Settings:
+    """贴纸自身的偏好：位置、透明度、是否置顶等。"""
+
+    DEFAULTS = {
+        "x": None,
+        "y": None,
+        "alpha": 0.92,
+        "always_on_top": True,
+        "auto_refresh": True,
+        "refresh_ms": 5000,
+    }
+
+    def __init__(self, path=None):
+        self.path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
+        self.data = dict(self.DEFAULTS)
+        if os.path.exists(self.path):
+            try:
+                with open(self.path, "r", encoding="utf-8") as f:
+                    self.data.update(json.load(f))
+            except Exception:
+                pass
+
+    def save(self):
+        try:
+            with open(self.path, "w", encoding="utf-8") as f:
+                json.dump(self.data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+
+class Sticker(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.settings = Settings()
+        self.store = ProfileStore()
+        self.interfaces = []
+        self.current_iface = ""
+        self._drag = {"x": 0, "y": 0}
+
+        self._apply_window_attrs()
+        self._build_ui()
+        self._load_position()
+        self.refresh_interfaces()
+        self.schedule_refresh()
+
+    # ---------------- 窗口属性 ----------------
+    def _apply_window_attrs(self):
+        # 无边框：贴纸的关键，去掉标题栏和窗口边框
+        self.overrideredirect(True)
+        try:
+            self.attributes("-alpha", self.settings.data["alpha"])
+        except Exception:
+            pass
+        if self.settings.data["always_on_top"]:
+            self.attributes("-topmost", True)
+        # Windows 专用：不在任务栏显示
+        try:
+            self.attributes("-toolwindow", True)
+        except Exception:
+            pass
+        self.configure(bg=BG)
+        self.resizable(False, False)
+
+    def _load_position(self):
+        # 先给个默认几何，再按上次记忆的位置摆放
+        self.update_idletasks()
+        w, h = 240, 132
+        x = self.settings.data.get("x")
+        y = self.settings.data.get("y")
+        if x is None or y is None:
+            x = self.winfo_screenwidth() - w - 20
+            y = self.winfo_screenheight() - h - 60
+        # 位置越界（比如换了显示器）就拉回屏幕内
+        x = max(0, min(int(x), self.winfo_screenwidth() - 40))
+        y = max(0, min(int(y), self.winfo_screenheight() - 40))
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    # ---------------- UI ----------------
+    def _build_ui(self):
+        header = tk.Frame(self, bg=BG_HEADER, height=26)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+
+        self.dot = tk.Label(header, text="●", bg=BG_HEADER, fg=OK, font=("Segoe UI", 9))
+        self.dot.pack(side=tk.LEFT, padx=(8, 4))
+        tk.Label(header, text=APP_TITLE, bg=BG_HEADER, fg=FG,
+                 font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        self._drag_bind(header)
+
+        btn_close = tk.Label(header, text="×", bg=BG_HEADER, fg=FG_DIM,
+                             font=("Segoe UI", 12), cursor="hand2")
+        btn_close.pack(side=tk.RIGHT, padx=(0, 8))
+        btn_close.bind("<Button-1>", lambda e: self.on_close())
+        btn_close.bind("<Enter>", lambda e: btn_close.config(fg="#f48771"))
+        btn_close.bind("<Leave>", lambda e: btn_close.config(fg=FG_DIM))
+
+        btn_menu = tk.Label(header, text="≡", bg=BG_HEADER, fg=FG_DIM,
+                            font=("Segoe UI", 13), cursor="hand2")
+        btn_menu.pack(side=tk.RIGHT, padx=6)
+        btn_menu.bind("<Button-1>", lambda e: self.show_menu(e))
+        btn_menu.bind("<Enter>", lambda e: btn_menu.config(fg=FG))
+        btn_menu.bind("<Leave>", lambda e: btn_menu.config(fg=FG_DIM))
+
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 0))
+
+        self.lbl_iface = tk.Label(body, text="—", bg=BG, fg=FG_DIM, anchor=tk.W,
+                                  font=("Microsoft YaHei UI", 8))
+        self.lbl_iface.pack(fill=tk.X)
+
+        self.lbl_ip = tk.Label(body, text="读取中…", bg=BG, fg=FG, anchor=tk.W,
+                               font=("Consolas", 15, "bold"))
+        self.lbl_ip.pack(fill=tk.X)
+
+        self.lbl_gw = tk.Label(body, text="", bg=BG, fg=FG_DIM, anchor=tk.W,
+                               font=("Microsoft YaHei UI", 8))
+        self.lbl_gw.pack(fill=tk.X)
+
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill=tk.X, padx=8, pady=6)
+        for text, cmd in (("方案", lambda: self.show_menu()),
+                          ("DHCP", self.apply_dhcp),
+                          ("刷新", self.refresh_status)):
+            b = tk.Label(bar, text=text, bg="#333333", fg=FG, padx=10, pady=2,
+                         font=("Microsoft YaHei UI", 8), cursor="hand2")
+            b.pack(side=tk.LEFT, padx=(0, 5))
+            b.bind("<Button-1>", lambda e, c=cmd: c())
+            b.bind("<Enter>", lambda e, b=b: b.config(bg=ACCENT))
+            b.bind("<Leave>", lambda e, b=b: b.config(bg="#333333"))
+
+        # 让正文也能拖动，但按钮不参与
+        for wgt in (body, self.lbl_iface, self.lbl_ip, self.lbl_gw, bar):
+            self._drag_bind(wgt)
+        # 任意位置右键都出菜单
+        for cls in (self, header, body):
+            cls.bind("<Button-3>", lambda e: self.show_menu(e))
+        self.bind("<Escape>", lambda e: self.on_close())
+
+    def _drag_bind(self, widget):
+        widget.bind("<ButtonPress-1>", self._drag_start)
+        widget.bind("<B1-Motion>", self._drag_move)
+
+    def _drag_start(self, event):
+        self._drag["x"] = event.x_root - self.winfo_x()
+        self._drag["y"] = event.y_root - self.winfo_y()
+
+    def _drag_move(self, event):
+        self.geometry(f"+{event.x_root - self._drag['x']}+{event.y_root - self._drag['y']}")
+
+    # ---------------- 右键菜单 ----------------
+    def show_menu(self, event=None):
+        menu = tk.Menu(self, tearoff=0, bg="#252526", fg=FG,
+                       activebackground=ACCENT, activeforeground="#ffffff",
+                       borderwidth=0, relief="flat")
+
+        menu.add_command(label=f"网卡：{self._iface_name()}", state="disabled")
+        menu.add_separator()
+
+        menu.add_command(label="刷新", command=self.refresh_status)
+        menu.add_separator()
+
+        profiles = self.store.load()
+        if profiles:
+            for i, p in enumerate(profiles):
+                menu.add_command(label=f"  切换到 {p.get('name')}",
+                                 command=lambda pf=p: self.apply_profile(pf))
+        else:
+            menu.add_command(label="（暂无方案，请用完整版添加）", state="disabled")
+        menu.add_command(label="切换到 DHCP", command=self.apply_dhcp)
+        menu.add_separator()
+
+        top_var = tk.BooleanVar(value=self.settings.data["always_on_top"])
+        ar_var = tk.BooleanVar(value=self.settings.data["auto_refresh"])
+
+        sub_opacity = tk.Menu(menu, tearoff=0, bg="#252526", fg=FG,
+                              activebackground=ACCENT, activeforeground="#ffffff")
+        for value in (0.5, 0.7, 0.85, 0.92, 1.0):
+            sub_opacity.add_command(label=f"{int(value * 100)}%",
+                                    command=lambda v=value: self.set_opacity(v))
+
+        menu.add_checkbutton(label="始终置顶", variable=top_var,
+                             command=lambda: self.toggle_top())
+        menu.add_checkbutton(label="自动刷新", variable=ar_var,
+                             command=lambda: self.toggle_auto_refresh())
+        menu.add_cascade(label="透明度", menu=sub_opacity)
+        menu.add_separator()
+
+        if not is_admin():
+            menu.add_command(label="以管理员重启", command=self.relaunch_admin)
+        menu.add_command(label="管理方案…", command=self.open_manager)
+        menu.add_separator()
+        menu.add_command(label="退出", command=self.on_close)
+
+        if event:
+            menu.tk_popup(event.x_root, event.y_root)
+        else:
+            menu.tk_popup(self.winfo_rootx() + 10, self.winfo_rooty() + 30)
+
+    # ---------------- 数据 ----------------
+    def refresh_interfaces(self):
+        try:
+            self.interfaces = list_interfaces()
+        except Exception:
+            self.interfaces = []
+        self.current_iface = self.interfaces[0]["name"] if self.interfaces else ""
+        self.refresh_status()
+
+    def _iface_name(self):
+        return self.current_iface or "（无网卡）"
+
+    def refresh_status(self):
+        if not self.current_iface:
+            self.lbl_ip.config(text="无网卡", fg=WARN)
+            self.dot.config(fg=WARN)
+            return
+        try:
+            st = get_status(self.current_iface)
+        except Exception as e:
+            self.lbl_ip.config(text="读取失败", fg=WARN)
+            self.dot.config(fg=WARN)
+            self.lbl_gw.config(text=str(e)[:40])
+            return
+
+        ips = st["ips"]
+        if ips:
+            self.lbl_ip.config(text=ips[0], fg=FG)
+            extra = f" +{len(ips) - 1}" if len(ips) > 1 else ""
+            self.dot.config(fg=OK)
+        else:
+            self.lbl_ip.config(text="未分配", fg=WARN)
+            extra = ""
+            self.dot.config(fg=WARN)
+
+        gw = st["gateways"][0] if st["gateways"] else "—"
+        mode = "DHCP" if st["dhcp"] else "静态"
+        self.lbl_iface.config(text=f"{st['interface']}  ·  {mode}{extra}")
+        self.lbl_gw.config(text=f"网关 {gw}")
+
+    def schedule_refresh(self):
+        if self.settings.data["auto_refresh"]:
+            self.refresh_status()
+        self.after(self.settings.data["refresh_ms"], self.schedule_refresh)
+
+    # ---------------- 操作 ----------------
+    def apply_profile(self, profile):
+        name = profile.get("name")
+        if not messagebox.askyesno("确认", f"切换到方案「{name}」？", parent=self):
+            return
+        try:
+            apply_profile(self._iface_name(), profile)
+        except Exception as e:
+            messagebox.showerror("失败", str(e), parent=self)
+            return
+        self.refresh_status()
+
+    def apply_dhcp(self):
+        if not messagebox.askyesno("确认", "切换到自动获取 (DHCP)？", parent=self):
+            return
+        try:
+            set_dhcp(self._iface_name())
+        except Exception as e:
+            messagebox.showerror("失败", str(e), parent=self)
+            return
+        self.refresh_status()
+
+    def set_opacity(self, value):
+        self.settings.data["alpha"] = value
+        try:
+            self.attributes("-alpha", value)
+        except Exception:
+            pass
+        self.settings.save()
+
+    def toggle_top(self):
+        self.settings.data["always_on_top"] = not self.settings.data["always_on_top"]
+        self.attributes("-topmost", self.settings.data["always_on_top"])
+        self.settings.save()
+
+    def toggle_auto_refresh(self):
+        self.settings.data["auto_refresh"] = not self.settings.data["auto_refresh"]
+        self.settings.save()
+
+    def relaunch_admin(self):
+        if run_as_admin():
+            self.on_close()
+        else:
+            messagebox.showerror("失败", "提权失败，请手动右键以管理员身份运行", parent=self)
+
+    def open_manager(self):
+        """打开完整版管理界面（开发态跑 app.py，打包态提示用另一个 exe）。"""
+        import subprocess
+        import sys
+        if getattr(sys, "frozen", False):
+            messagebox.showinfo("管理方案", "请运行同目录下的 IPSwitcher.exe 管理方案", parent=self)
+            return
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py")
+        if os.path.exists(path):
+            subprocess.Popen([sys.executable, path])
+        else:
+            messagebox.showinfo("提示", "未找到 app.py", parent=self)
+
+    def on_close(self):
+        self.settings.data["x"] = self.winfo_x()
+        self.settings.data["y"] = self.winfo_y()
+        self.settings.save()
+        self.destroy()
+
+
+if __name__ == "__main__":
+    Sticker().mainloop()

@@ -27,29 +27,37 @@ echo [2/3] Cleaning old build...
 if exist build rmdir /s /q build
 if exist dist rmdir /s /q dist
 
-echo [3/3] Building...
+echo [3/3] Building main app...
 if exist version_info.txt (
-    python -m PyInstaller --noconfirm --clean --onefile --windowed --name "IPSwitcher" --uac-admin --version-file version_info.txt app.py
+    python -m PyInstaller --noconfirm --clean --onefile --name "IPSwitcher" --uac-admin --version-file version_info.txt app.py
 ) else (
-    python -m PyInstaller --noconfirm --clean --onefile --windowed --name "IPSwitcher" --uac-admin app.py
+    python -m PyInstaller --noconfirm --clean --onefile --name "IPSwitcher" --uac-admin app.py
+)
+if errorlevel 1 python -m PyInstaller --noconfirm --clean --onefile --name "IPSwitcher" --uac-admin app.py
+if errorlevel 1 (
+    echo [ERROR] Main app build failed.
+    pause
+    exit /b 1
 )
 
-if errorlevel 1 (
-    echo.
-    echo [WARN] Build with version-info failed, retrying without it...
-    python -m PyInstaller --noconfirm --clean --onefile --windowed --name "IPSwitcher" --uac-admin app.py
+echo [+] Building desktop sticker...
+if exist version_info.txt (
+    python -m PyInstaller --noconfirm --clean --onefile --name "IPSwitcherSticker" --uac-admin --version-file version_info.txt sticker.py
+) else (
+    python -m PyInstaller --noconfirm --clean --onefile --name "IPSwitcherSticker" --uac-admin sticker.py
 )
-
+if errorlevel 1 python -m PyInstaller --noconfirm --clean --onefile --name "IPSwitcherSticker" --uac-admin sticker.py
 if errorlevel 1 (
-    echo.
-    echo [ERROR] Build failed.
+    echo [ERROR] Sticker build failed.
     pause
     exit /b 1
 )
 
 echo.
 echo ============================================
-echo   Done! Output: dist\IPSwitcher.exe
+echo   Done!
+echo     dist\IPSwitcher.exe         完整管理界面
+echo     dist\IPSwitcherSticker.exe  桌面贴纸悬浮窗
 echo ============================================
 echo.
 pause

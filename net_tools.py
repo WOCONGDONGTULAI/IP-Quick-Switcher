@@ -138,6 +138,118 @@ def get_current_config(iface):
     return lines
 
 
+# `netsh interface ipv4 show config` 的字段标签，同时支持中文与英文 Windows
+_KEY_MAP = {
+    "dhcp enabled": "dhcp",
+    "dhcp 已启用": "dhcp",
+    "ip address": "ip",
+    "ip 地址": "ip",
+    "default gateway": "gateway",
+    "默认网关": "gateway",
+    "subnet prefix": "prefix",
+    "子网前缀": "prefix",
+    "statically configured dns servers": "dns_static",
+    "静态配置的 dns 服务器": "dns_static",
+    "dns servers configured through dhcp": "dns_dhcp",
+    "通过 dhcp 配置的 dns 服务器": "dns_dhcp",
+}
+
+
+def parse_config_kv(text):
+    """
+    把 `netsh interface ipv4 show config` 的输出解析成字典。
+
+    返回 {'dhcp': [...], 'ip': [...], 'gateway': [...], 'prefix': [...], ...}
+
+    注意：某字段有多个值时，后续行是缩进 continuation、没有 key，
+    必须归到上一个字段，否则会丢 DNS / 多 IP。
+    """
+    result = {}
+    last_key = None
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+
+        key_part, _, value = line.partition(":")
+        # 真正的 kv 行，冒号前必须有字母/文字标签（"网关跃点数"、"InterfaceMetric"）。
+        # 续行没有标签，纯缩进值，例如紧跟在 DNS 后面的那个 "8.8.8.8"。
+        # 注意不能简单用「有冒号」区分：IPv6 地址本身含冒号，会被误判成 kv 行。
+        is_kv = ":" in line and any(ch.isalpha() for ch in key_part)
+
+        if not is_kv:
+            value = line.strip()
+            if last_key and value:
+                result[last_key].append(value)
+            continue
+
+        canon = _KEY_MAP.get(key_part.strip().lower())
+        value = value.strip()
+        if canon is None:
+            # 未纳入的字段必须断开续行关联，否则它的值会污染上一个字段
+            last_key = None
+            continue
+        result.setdefault(canon, [])
+        if value:
+            result[canon].append(value)
+        last_key = canon
+    return result
+
+
+def prefix_to_mask(prefix):
+    """把 '192.168.1.0/24' 或 '/24' 换算成点分掩码；失败返回 None。"""
+    length = prefix.partition("/")[2].strip()
+    if not length.isdigit():
+        return None
+    bits = int(length)
+    if not 0 <= bits <= 32:
+        return None
+    num = (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF
+    return ".".join(str((num >> s) & 0xFF) for s in (24, 16, 8, 0))
+
+
+def get_status(iface):
+    """
+    获取网卡的结构化状态。
+
+    返回 dict：
+        {
+          'interface': 网卡名,
+          'dhcp': True / False / None,
+          'ips': ['192.168.1.100', ...],
+          'gateways': [...],
+          'masks': [...],
+          'dns': [...],
+        }
+    """
+    code, out, err = _run(["netsh", "interface", "ipv4", "show", "config", f"name={iface}"])
+    if code != 0:
+        raise RuntimeError(err.strip() or out.strip() or "读取配置失败")
+
+    kv = parse_config_kv(out)
+
+    masks = []
+    for pfx in kv.get("prefix", []):
+        m = re.search(r"mask\s+([\d.]+)", pfx, re.IGNORECASE)
+        if m:
+            masks.append(m.group(1))
+        else:
+            converted = prefix_to_mask(pfx.split()[0] if pfx.split() else "")
+            if converted:
+                masks.append(converted)
+
+    dhcp_raw = kv.get("dhcp", [None])[0]
+    dhcp = None if dhcp_raw is None else dhcp_raw.strip().lower() in ("yes", "true", "是", "y")
+    return {
+        "interface": iface,
+        "dhcp": dhcp,
+        "ips": kv.get("ip", []),
+        "gateways": kv.get("gateway", []),
+        "masks": masks,
+        "dns": kv.get("dns_static", []) or kv.get("dns_dhcp", []),
+    }
+
+
 def valid_ip(value, allow_empty=False):
     """校验 IPv4 地址合法性。"""
     value = (value or "").strip()

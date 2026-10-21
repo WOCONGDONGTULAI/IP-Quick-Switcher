@@ -10,5 +10,8 @@ dist/
 # 本地方案配置，含真实内网 IP，不入库
 ip_profiles.json
 
+# 贴纸界面的窗口位置 / 透明度偏好
+sticker_config.json
+
 .DS_Store
 Thumbs.db
