@@ -12,6 +12,7 @@ IP 切换器 - 桌面贴纸（桌面小组件）
 """
 import json
 import os
+import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
 
@@ -54,13 +55,21 @@ class Settings:
         "x": None,
         "y": None,
         "alpha": 0.92,
-        "mode": "desktop",      # desktop / top / normal
+        # 桌面层模式依赖 Explorer，部分机器资源管理器未就绪时贴纸会不可见；
+        # 默认改为悬浮置顶，保证一启动就能看见，用户可右键改回桌面层。
+        "mode": "top",
         "auto_refresh": True,
         "refresh_ms": 5000,
     }
 
     def __init__(self, path=None):
-        self.path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
+        # 打包后 __file__ 指向临时解压目录，配置必须在 exe 旁边才留得住
+        if path:
+            self.path = path
+        elif getattr(sys, "frozen", False):
+            self.path = os.path.join(os.path.dirname(sys.executable), SETTINGS_FILE)
+        else:
+            self.path = os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
         self.data = dict(self.DEFAULTS)
         stored = None
         if os.path.exists(self.path):
