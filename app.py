@@ -18,6 +18,7 @@ from net_tools import (
 from config_store import ProfileStore
 from tray import (
     TrayIcon,
+    _bundled_ico_path,
     ensure_autostart,
     is_autostart_enabled,
     toggle_autostart,
@@ -34,7 +35,9 @@ class App(tk.Tk):
         self.geometry("860x620")
         self.resizable(True, True)
         try:
-            self.iconbitmap(default="")
+            ico = _bundled_ico_path()
+            if ico:
+                self.iconbitmap(default=ico)
         except Exception:
             pass
 

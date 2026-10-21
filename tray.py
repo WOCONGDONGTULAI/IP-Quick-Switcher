@@ -85,6 +85,9 @@ def _declare_prototypes():
     try:
         shell32.Shell_NotifyIconW.argtypes = [ctypes.c_uint, ctypes.POINTER(NOTIFYICONDATA)]
         shell32.Shell_NotifyIconW.restype = ctypes.c_bool
+        shell32.ExtractIconExW.argtypes = [ctypes.c_wchar_p, ctypes.c_int,
+                                           ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+        shell32.ExtractIconExW.restype = ctypes.c_uint
     except Exception:
         pass
     for fn in ("CreateWindowExW", "RegisterClassW", "DefWindowProcW", "CreatePopupMenu",
@@ -138,11 +141,22 @@ def _declare_prototypes():
 _declare_prototypes()
 
 
-def _resource_ico_path():
-    """打包后从 exe 自身取图标；源码运行时返回空（用系统默认图标）。"""
-    if not getattr(sys, "frozen", False):
-        return ""
-    return sys.executable
+def _bundled_ico_path():
+    """随包附带的 app.ico（--add-data 打进去），找不到返回空。"""
+    cands = []
+    if getattr(sys, "frozen", False):
+        cands.append(os.path.join(getattr(sys, "_MEIPASS", ""), "app.ico"))
+        cands.append(os.path.join(os.path.dirname(sys.executable), "app.ico"))
+    else:
+        cands.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico"))
+    for c in cands:
+        if c and os.path.exists(c):
+            return c
+    return ""
+
+
+# 兼容旧调用名
+_resource_ico_path = _bundled_ico_path
 
 
 class TrayIcon:
@@ -192,13 +206,22 @@ class TrayIcon:
                 pass
 
     def _icon_handle(self):
-        ico = _resource_ico_path()
+        # 打包后直接从 exe 自身提取图标（LoadImageW 不能读 exe 资源，得用 ExtractIconExW）
+        if getattr(sys, "frozen", False):
+            hicon = ctypes.c_void_p(0)
+            try:
+                n = shell32.ExtractIconExW(sys.executable, 0, ctypes.byref(hicon), None, 1)
+                if n and hicon:
+                    return hicon.value
+            except Exception:
+                pass
+        ico = _bundled_ico_path()
         if ico and os.path.exists(ico):
             h = user32.LoadImageW(None, ico, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE)
             if h:
                 return h
-        # MAKEINTRESOURCE: 系统图标 ID 要当指针传（值小于 65536 即可当地址用）
-        return user32.LoadIconW(None, ctypes.cast(IDC_ARROW, ctypes.c_wchar_p))
+        # 兜底：系统默认应用程序图标（IDI_APPLICATION），不是光标
+        return user32.LoadIconW(None, ctypes.cast(IDI_APPLICATION, ctypes.c_wchar_p))
 
     def _add_icon(self):
         nid = NOTIFYICONDATA()

@@ -307,15 +307,22 @@ class Sticker(tk.Tk):
             未选中 = 深色胶囊，白点在右（参考图样式）
             选中   = 反色浅色胶囊，深点在左（与未选中方向、颜色均相反）
         """
-        for w in self._items:
-            w.destroy()
+        for item in self._items:
+            for w in item:
+                if w is not None:
+                    try:
+                        w.destroy()
+                    except Exception:
+                        pass
         self._items = []
 
         if not profiles:
-            tk.Label(
+            lbl = tk.Label(
                 self.list_frame, text="暂无方案\n去主界面添加", bg=BG, fg=FG_DIM,
                 font=("Microsoft YaHei UI", 9), justify=tk.CENTER,
-            ).pack(expand=True, pady=18)
+            )
+            lbl.pack(expand=True, pady=18)
+            self._items.append((lbl, None))
             return
 
         for idx, p in enumerate(profiles):
@@ -371,7 +378,10 @@ class Sticker(tk.Tk):
 
     def _mark_active(self):
         """重画每行开关：选中项反色反向，其余保持参考图样式。"""
-        for i, (_, toggle) in enumerate(self._items):
+        for i, item in enumerate(self._items):
+            toggle = item[1]
+            if toggle is None:
+                continue
             try:
                 self._draw_toggle(toggle, i == self.active_index)
             except Exception:
