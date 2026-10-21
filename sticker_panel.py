@@ -84,13 +84,23 @@ def kill_sticker():
 
 
 def launch_sticker():
-    """拉起贴纸。打包后用同一个 exe 加 --sticker 参数。"""
+    """拉起贴纸。打包后用同一个 exe 加 --sticker 参数。
+
+    启动前先清掉残留的 sticker.pid：上次如果是被强杀的，文件还在，
+    会让主界面误判"贴纸在运行"，下次点应用时又去杀一个不存在的 PID。
+    """
+    try:
+        if read_sticker_pid() == 0:
+            os.remove(_state_path())
+    except Exception:
+        pass
     if getattr(sys, "frozen", False):
-        subprocess.Popen([sys.executable, "--sticker"])
+        subprocess.Popen([sys.executable, "--sticker"],
+                         cwd=os.path.dirname(sys.executable))
     else:
         py = sys.executable
         script = os.path.join(app_dir(), "sticker.py")
-        subprocess.Popen([py, script])
+        subprocess.Popen([py, script], cwd=app_dir())
 
 
 class StickerPanel(ttk.LabelFrame):
@@ -255,7 +265,16 @@ class StickerPanel(ttk.LabelFrame):
         import time
         time.sleep(0.4)
         launch_sticker()
-        self.status.config(text="贴纸已启动，配置已生效", foreground="#2e7d32")
+        # 等贴纸把 PID 登记上再报状态，避免刚启动就显示"未运行"
+        for _ in range(25):
+            time.sleep(0.4)
+            if sticker_running():
+                break
+        self.status.config(
+            text="贴纸已启动，配置已生效" if sticker_running()
+            else "贴纸启动中…（若一直不出现请手动关闭重试）",
+            foreground="#2e7d32" if sticker_running() else "#b26a00",
+        )
         if self.on_change:
             self.on_change()
 
