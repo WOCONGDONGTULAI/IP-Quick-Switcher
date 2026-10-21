@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-IP 切换器 - 桌面贴纸（悬浮小组件）
+IP 切换器 - 桌面贴纸（桌面小组件）
 
-无边框、永远置顶、可拖动、半透明，显示当前网卡 IP 并支持一键切换方案。
-右键打开菜单：方案列表 / DHCP / 置顶 / 透明度 / 退出。
+无边框、可拖动、半透明，显示当前网卡 IP 并支持一键切换方案。
+右键打开菜单：方案列表 / DHCP / 显示模式 / 透明度 / 退出。
+
+显示模式有三种：
+    desktop  嵌入桌面层（默认）—— 随桌面显示，不干扰其他窗口
+    top      悬浮置顶        —— 永远盖在其他窗口之上
+    normal   普通窗口        —— 会被正常遮挡
 """
 import json
 import os
@@ -19,8 +24,17 @@ from net_tools import (
     run_as_admin,
 )
 from config_store import ProfileStore
+from win_desktop import attach as desktop_attach
+from win_desktop import detach as desktop_detach
+from win_desktop import is_supported as desktop_supported
 
 APP_TITLE = "IP 贴纸"
+
+MODES = {
+    "desktop": "嵌入桌面层",
+    "top": "悬浮置顶",
+    "normal": "普通窗口",
+}
 
 BG = "#1e1e1e"
 BG_HEADER = "#2d2d2d"
@@ -34,13 +48,13 @@ SETTINGS_FILE = "sticker_config.json"
 
 
 class Settings:
-    """贴纸自身的偏好：位置、透明度、是否置顶等。"""
+    """贴纸自身的偏好：位置、透明度、显示模式等。"""
 
     DEFAULTS = {
         "x": None,
         "y": None,
         "alpha": 0.92,
-        "always_on_top": True,
+        "mode": "desktop",      # desktop / top / normal
         "auto_refresh": True,
         "refresh_ms": 5000,
     }
@@ -48,12 +62,20 @@ class Settings:
     def __init__(self, path=None):
         self.path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), SETTINGS_FILE)
         self.data = dict(self.DEFAULTS)
+        stored = None
         if os.path.exists(self.path):
             try:
                 with open(self.path, "r", encoding="utf-8") as f:
-                    self.data.update(json.load(f))
+                    stored = json.load(f)
             except Exception:
-                pass
+                stored = None
+        if isinstance(stored, dict):
+            self.data.update(stored)
+            # 旧版配置只有 always_on_top 布尔值，迁移到新的三档模式。
+            # 注意判断依据是「旧配置里有没有 always_on_top」，不能看 mode 是否存在——
+            # 因为 DEFAULTS 里已经带了 mode，那样判断永远不成立。
+            if "mode" not in stored and "always_on_top" in stored:
+                self.data["mode"] = "top" if stored["always_on_top"] else "desktop"
 
     def save(self):
         try:
@@ -71,9 +93,11 @@ class Sticker(tk.Tk):
         self.interfaces = []
         self.current_iface = ""
         self._drag = {"x": 0, "y": 0}
+        self._attached = False
 
-        self._apply_window_attrs()
         self._build_ui()
+        self._apply_window_attrs()
+        self._apply_mode()
         self._load_position()
         self.refresh_interfaces()
         self.schedule_refresh()
@@ -86,8 +110,10 @@ class Sticker(tk.Tk):
             self.attributes("-alpha", self.settings.data["alpha"])
         except Exception:
             pass
-        if self.settings.data["always_on_top"]:
-            self.attributes("-topmost", True)
+        try:
+            self.attributes("-topmost", self.settings.data["mode"] == "top")
+        except Exception:
+            pass
         # Windows 专用：不在任务栏显示
         try:
             self.attributes("-toolwindow", True)
@@ -95,6 +121,32 @@ class Sticker(tk.Tk):
             pass
         self.configure(bg=BG)
         self.resizable(False, False)
+
+    def _hwnd(self):
+        """取窗口句柄；非 Windows 返回 0。"""
+        if not desktop_supported():
+            return 0
+        try:
+            self.update_idletasks()
+            return int(self.frame(), 16)
+        except Exception:
+            return 0
+
+    def _apply_mode(self):
+        """按当前模式落到对应的窗口层级。"""
+        mode = self.settings.data.get("mode", "desktop")
+        try:
+            self.attributes("-topmost", mode == "top")
+        except Exception:
+            pass
+        if mode != "desktop":
+            if self._attached:
+                desktop_detach(self._hwnd())
+                self._attached = False
+            return
+        # 桌面模式下不能有 -topmost，二者互斥
+        if not self._attached:
+            self._attached = desktop_attach(self._hwnd())
 
     def _load_position(self):
         # 先给个默认几何，再按上次记忆的位置摆放
@@ -204,8 +256,8 @@ class Sticker(tk.Tk):
         menu.add_command(label="切换到 DHCP", command=self.apply_dhcp)
         menu.add_separator()
 
-        top_var = tk.BooleanVar(value=self.settings.data["always_on_top"])
         ar_var = tk.BooleanVar(value=self.settings.data["auto_refresh"])
+        mode_var = tk.StringVar(value=self.settings.data.get("mode", "desktop"))
 
         sub_opacity = tk.Menu(menu, tearoff=0, bg="#252526", fg=FG,
                               activebackground=ACCENT, activeforeground="#ffffff")
@@ -213,8 +265,21 @@ class Sticker(tk.Tk):
             sub_opacity.add_command(label=f"{int(value * 100)}%",
                                     command=lambda v=value: self.set_opacity(v))
 
-        menu.add_checkbutton(label="始终置顶", variable=top_var,
-                             command=lambda: self.toggle_top())
+        # 显示模式三选一；桌面嵌入在不支持的系统（非 Windows）上禁用
+        sub_mode = tk.Menu(menu, tearoff=0, bg="#252526", fg=FG,
+                           activebackground=ACCENT, activeforeground="#ffffff")
+        for key, label in MODES.items():
+            state = "normal" if (key != "desktop" or desktop_supported()) else "disabled"
+            if key == "desktop":
+                label = f"{label}（推荐）"
+            sub_mode.add_radiobutton(label=label, variable=mode_var, value=key,
+                                     command=lambda k=key: self.set_mode(k),
+                                     state=state)
+        if self.settings.data.get("mode") == "desktop" and not self._attached:
+            sub_mode.add_separator()
+            sub_mode.add_command(label="重新贴回桌面", command=self.reattach_desktop)
+
+        menu.add_cascade(label="显示模式", menu=sub_mode)
         menu.add_checkbutton(label="自动刷新", variable=ar_var,
                              command=lambda: self.toggle_auto_refresh())
         menu.add_cascade(label="透明度", menu=sub_opacity)
@@ -274,6 +339,9 @@ class Sticker(tk.Tk):
     def schedule_refresh(self):
         if self.settings.data["auto_refresh"]:
             self.refresh_status()
+            # Explorer 重启会让桌面附着失效，趁着刷新周期补回来
+            if self.settings.data.get("mode") == "desktop" and not self._attached:
+                self._attached = desktop_attach(self._hwnd())
         self.after(self.settings.data["refresh_ms"], self.schedule_refresh)
 
     # ---------------- 操作 ----------------
@@ -306,10 +374,26 @@ class Sticker(tk.Tk):
             pass
         self.settings.save()
 
-    def toggle_top(self):
-        self.settings.data["always_on_top"] = not self.settings.data["always_on_top"]
-        self.attributes("-topmost", self.settings.data["always_on_top"])
+    def set_mode(self, mode):
+        if mode not in MODES:
+            return
+        self.settings.data["mode"] = mode
         self.settings.save()
+        self._apply_mode()
+        # 解除附着后可能缩到后面，重新提一下
+        if mode != "desktop":
+            try:
+                self.lift()
+            except Exception:
+                pass
+
+    def reattach_desktop(self):
+        """Explorer 重启后附着会失效，用它重新贴回去。"""
+        self._attached = desktop_attach(self._hwnd())
+        if not self._attached:
+            messagebox.showwarning("贴回桌面失败",
+                                   "没有找到桌面窗口。请确认 Windows 资源管理器正在运行。",
+                                   parent=self)
 
     def toggle_auto_refresh(self):
         self.settings.data["auto_refresh"] = not self.settings.data["auto_refresh"]
