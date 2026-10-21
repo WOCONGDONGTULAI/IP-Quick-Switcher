@@ -25,6 +25,7 @@ from net_tools import (
     run_as_admin,
 )
 from config_store import ProfileStore
+from tray import TrayIcon, ensure_autostart, is_autostart_enabled, toggle_autostart
 from win_desktop import attach as desktop_attach
 from win_desktop import detach as desktop_detach
 from win_desktop import is_supported as desktop_supported
@@ -107,6 +108,10 @@ class Sticker(tk.Tk):
         self._build_ui()
         self._apply_window_attrs()
         self._apply_mode()
+
+        # 托盘图标：贴纸关掉后还能从托盘唤回；并写入开机自启
+        self.tray = TrayIcon(self, tip="IP 快速切换器 - 贴纸")
+        ensure_autostart()
         self._load_position()
         self.refresh_interfaces()
         self.schedule_refresh()
@@ -179,8 +184,7 @@ class Sticker(tk.Tk):
 
         self.dot = tk.Label(header, text="●", bg=BG_HEADER, fg=OK, font=("Segoe UI", 9))
         self.dot.pack(side=tk.LEFT, padx=(8, 4))
-        tk.Label(header, text=APP_TITLE, bg=BG_HEADER, fg=FG,
-                 font=("Microsoft YaHei UI", 9)).pack(side=tk.LEFT)
+        # 按需求：不要标题文字，只留状态点，靠 ≡ 菜单操作
         self._drag_bind(header)
 
         btn_close = tk.Label(header, text="×", bg=BG_HEADER, fg=FG_DIM,
@@ -298,7 +302,15 @@ class Sticker(tk.Tk):
             menu.add_command(label="以管理员重启", command=self.relaunch_admin)
         menu.add_command(label="管理方案…", command=self.open_manager)
         menu.add_separator()
-        menu.add_command(label="退出", command=self.on_close)
+
+        # 开机自启开关（★ 表示当前已开启）
+        _on = is_autostart_enabled()
+        menu.add_checkbutton(
+            label="开机自动运行",
+            command=self.toggle_autostart_entry,
+        )
+        menu.add_separator()
+        menu.add_command(label="退出", command=self.quit_app)
 
         if event:
             menu.tk_popup(event.x_root, event.y_root)
@@ -428,10 +440,37 @@ class Sticker(tk.Tk):
             messagebox.showinfo("提示", "未找到 app.py", parent=self)
 
     def on_close(self):
+        """点 × 收进托盘，托盘菜单里可真正退出。"""
         self.settings.data["x"] = self.winfo_x()
         self.settings.data["y"] = self.winfo_y()
         self.settings.save()
+        self.withdraw()
+
+    def quit_app(self):
+        """托盘菜单「退出」：保存位置后彻底结束。"""
+        try:
+            self.settings.data["x"] = self.winfo_x()
+            self.settings.data["y"] = self.winfo_y()
+            self.settings.save()
+        except Exception:
+            pass
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
         self.destroy()
+
+    def toggle_autostart_entry(self):
+        """菜单里开关开机自启。"""
+        enabled = is_autostart_enabled()
+        if toggle_autostart(not enabled):
+            messagebox.showinfo(
+                "开机自启",
+                "已开启开机自动运行" if not enabled else "已关闭开机自动运行",
+                parent=self,
+            )
+        else:
+            messagebox.showerror("失败", "写入注册表失败，请检查权限", parent=self)
 
 
 if __name__ == "__main__":

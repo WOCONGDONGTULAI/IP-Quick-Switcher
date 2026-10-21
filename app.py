@@ -15,6 +15,12 @@ from net_tools import (
     run_as_admin,
 )
 from config_store import ProfileStore
+from tray import (
+    TrayIcon,
+    ensure_autostart,
+    is_autostart_enabled,
+    toggle_autostart,
+)
 
 APP_TITLE = "IP 快速切换器"
 
@@ -23,8 +29,12 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("860x560")
+        self.geometry("860x620")
         self.resizable(True, True)
+        try:
+            self.iconbitmap(default="")
+        except Exception:
+            pass
 
         self.store = ProfileStore()
         self.profiles = self.store.load()
@@ -33,6 +43,14 @@ class App(tk.Tk):
         self._build_ui()
         self._refresh_interfaces()
         self._refresh_profile_list()
+        self._refresh_quick_bar()
+
+        # 托盘图标：最小化到托盘，关窗口退到托盘而不是直接结束
+        self.tray = TrayIcon(self)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._is_quitting = False
+
+        ensure_autostart()
 
         if not is_admin():
             self.status_var.set("提示：当前不是管理员，切换 IP 可能失败。建议右键以管理员身份运行。")
@@ -53,6 +71,18 @@ class App(tk.Tk):
         ttk.Button(top, text="刷新网卡", command=self._refresh_interfaces).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="当前配置", command=self._show_current).pack(side=tk.LEFT, padx=4)
         ttk.Button(top, text="以管理员重启", command=self._relaunch_admin).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="最小化到托盘", command=self._hide_to_tray).pack(side=tk.LEFT, padx=4)
+
+        self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
+        ttk.Checkbutton(
+            top, text="开机自启", variable=self.autostart_var,
+            command=self._toggle_autostart,
+        ).pack(side=tk.LEFT, padx=4)
+
+        # 顶部方案快捷条：所有方案一眼可见，点一下就切
+        self.quick_frame = ttk.LabelFrame(self, text="快捷切换（点击即切换到该方案）")
+        self.quick_frame.pack(fill=tk.X, padx=8, pady=(0, 4))
+        self._quick_buttons = []
 
         body = ttk.Frame(self)
         body.pack(fill=tk.BOTH, expand=True, **pad)
@@ -168,6 +198,54 @@ class App(tk.Tk):
             tag = "静态" if p.get("mode", "static") == "static" else "DHCP"
             self.plist.insert(tk.END, f"[{tag}] {p.get('name')}")
 
+    def _refresh_quick_bar(self):
+        """把每个方案做成顶部一枚按钮，双击/单击即切换。"""
+        for w in self._quick_buttons:
+            w.destroy()
+        self._quick_buttons = []
+
+        for idx, p in enumerate(self.profiles):
+            name = p.get("name") or "未命名"
+            ip = p.get("ip") or "DHCP"
+            btn = ttk.Button(
+                self.quick_frame,
+                text=f"{name}\n{ip}",
+                width=18,
+                command=lambda i=idx: self._quick_apply(i),
+            )
+            btn.pack(side=tk.LEFT, padx=4, pady=4)
+            self._quick_buttons.append(btn)
+
+        if not self.profiles:
+            ttk.Label(self.quick_frame, text="还没有方案 —— 在下面点「新增」创建第一个").pack(
+                side=tk.LEFT, padx=6, pady=8
+            )
+            return
+
+        ttk.Button(
+            self.quick_frame,
+            text="↻ DHCP",
+            width=10,
+            command=self._apply_dhcp,
+        ).pack(side=tk.RIGHT, padx=4, pady=4)
+
+    def _quick_apply(self, idx):
+        """点顶部快捷按钮：切到对应方案。"""
+        if idx >= len(self.profiles):
+            return
+        p = self.profiles[idx]
+        name = self._current_iface()
+        if not name:
+            messagebox.showwarning("提示", "请先在上方选择网卡")
+            return
+        self.plist.selection_clear(0, tk.END)
+        self.plist.selection_set(idx)
+        self.plist.see(idx)
+        self._select_profile()
+        if not messagebox.askyesno("确认", f"将网卡「{name}」切换到方案「{p.get('name')}」？"):
+            return
+        self._do_apply(name, p)
+
     def _collect_form(self):
         return {
             "name": self.f_name.get().strip(),
@@ -202,6 +280,7 @@ class App(tk.Tk):
             self.profiles.append(data)
         self.store.save(self.profiles)
         self._refresh_profile_list()
+        self._refresh_quick_bar()
         self.status_var.set("已保存")
 
     def _delete_profile(self):
@@ -213,6 +292,32 @@ class App(tk.Tk):
         del self.profiles[sel[0]]
         self.store.save(self.profiles)
         self._refresh_profile_list()
+        self._refresh_quick_bar()
+
+    # ---------------- 托盘 / 退出 ----------------
+    def _hide_to_tray(self):
+        self.withdraw()
+        self.tray.notify("已收进托盘，双击托盘图标可唤回")
+
+    def _toggle_autostart(self):
+        want = self.autostart_var.get()
+        if toggle_autostart(want):
+            self.status_var.set("已开启开机自启" if want else "已关闭开机自启")
+        else:
+            self.autostart_var.set(not want)
+            messagebox.showerror("失败", "写入注册表失败，请检查权限")
+
+    def _on_close(self):
+        """点 X 不退出，缩到托盘；托盘菜单里才能真正退出。"""
+        self._hide_to_tray()
+
+    def _quit(self):
+        self._is_quitting = True
+        try:
+            self.tray.stop()
+        except Exception:
+            pass
+        self.destroy()
 
     def _apply_selected(self):
         sel = self.plist.curselection()
