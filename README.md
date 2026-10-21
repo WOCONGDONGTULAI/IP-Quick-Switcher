@@ -140,6 +140,29 @@ netsh interface ipv4 set dnsservers name="以太网" dhcp
 | `test_commands.py` | 命令拼装单测（跨平台可跑） |
 | `build.bat` | 打包脚本（同时产出两个 exe） |
 | `run.bat` / `run_sticker.bat` | 源码启动脚本 |
+| `release.py` / `release.bat` | 自动发版脚本 |
+
+## 版本发布
+
+版本号规则：**纯数字递增**（1、2、3 ……）。数字最大那个就是最新版，
+到 [Releases](https://github.com/WOCONGDONGTULAI/IP-Quick-Switcher/releases) 页面一眼就看得出来。
+
+每次改动发布成新版本：
+
+```
+python release.py          # 自动取当前最大版本号 +1
+python release.py --dry-run # 只预览，不实际发布
+```
+
+Windows 上也可以直接双击 `release.bat`，它会先预览再让你确认。
+
+脚本做的事：读取现有 tag → 取最大数字 → +1 → 在当前 `main` 分支最新提交上打 tag 并创建 Release，
+更新说明自动从两次版本之间的 commit message 汇总。全程只调 API，不需要本地 clone。
+
+> 前提：安装 [GitHub CLI](https://cli.github.com) 并执行一次 `gh auth login`。
+
+每个 Release 自带 **Source code**（zip / tar.gz）附件，即该版本的完整源码。
+exe 因为要在 Windows 上编译，不随 Release 提供 —— 下载源码后跑 `build.bat` 即可生成。
 
 ## 免责
 
