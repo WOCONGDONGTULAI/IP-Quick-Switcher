@@ -63,7 +63,23 @@ Windows 上一键切换网卡 IP 配置的小工具。两种前端：
 
 ## 使用方式
 
-### 方式一：直接运行源码（需装 Python）
+### 方式一：安装包（推荐给普通用户）
+
+下载 [Releases](https://github.com/WOCONGDONGTULAI/IP-Quick-Switcher/releases) 或仓库 `dist/` 里的
+**`IPQuickSwitcher-Setup.exe`**（约 30MB，已内含下面两个 exe），双击后：
+
+1. 选安装位置（默认 `%LOCALAPPDATA%\IPQuickSwitcher`，免管理员权限）
+2. 勾选是否创建桌面快捷方式、是否开机自动运行
+3. 选「安装完成后」自动启动主界面还是贴纸
+
+装完得到两个程序：
+
+| 程序 | 角色 |
+|---|---|
+| `IPSwitcher.exe` | **主界面** —— 管理方案、切换 IP（顶部有方案快捷栏） |
+| `IPSwitcherSticker.exe` | **前端显示** —— 桌面贴纸，实时显示当前 IP、托盘常驻 |
+
+### 方式二：直接运行源码（需装 Python）
 
 1. 安装 [Python 3.8+](https://www.python.org/downloads/)，安装时勾选 **Add Python to PATH**
 2. 按需双击：
@@ -181,6 +197,7 @@ netsh interface ipv4 set dnsservers name="以太网" dhcp
 | `config_store.py` | 方案读写（JSON 持久化） |
 | `test_offline.py` | 解析与校验单测（跨平台可跑） |
 | `test_commands.py` | 命令拼装单测（跨平台可跑） |
+| `installer.py` | 安装向导（打包安装包时把两个 exe 内嵌进去） |
 | `build.bat` | 打包脚本（同时产出两个 exe） |
 | `run.bat` / `run_sticker.bat` | 源码启动脚本 |
 | `release.py` / `release.bat` | 自动发版脚本 |
